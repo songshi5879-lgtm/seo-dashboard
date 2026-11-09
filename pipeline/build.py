@@ -438,12 +438,22 @@ def build_site(site_id, month, folder, prev, warnings, extras):
 
     # ---- content (blog performance)
     unidx = {base_path(u["path"]): u["reason"] for u in unindexed}
-    pmap = {base_path(d["path"]): d for d in page_rows}
+    pmap = {}
+    for d in pages.values():
+        if d["path"].startswith("/"):
+            pmap.setdefault(base_path(d["path"]), d)
+    qp_by_path = {}
+    for r in qp:
+        qp_by_path.setdefault(base_path(r["path"]), []).append(r)
     content_rows = []
     articles = blog or [{"path": d["path"], "title": None, "published_on": None, "topic": None}
                         for d in page_rows if page_type(d["path"]) == "博客"]
     for a in articles:
         d = pmap.get(base_path(a["path"]), {})
+        kw = (a.get("main_keyword") or "").strip().lower()
+        hit = [r for r in qp_by_path.get(base_path(a["path"]), []) if kw and r["query"] == kw]
+        k_imp = sum(r["impressions"] for r in hit)
+        k_pos = round(sum((r["position"] or 0) * r["impressions"] for r in hit) / k_imp, 1) if k_imp else None
         pub = a.get("published_on")
         if base_path(a["path"]) in unidx:
             st = unidx[base_path(a["path"])]
@@ -456,7 +466,9 @@ def build_site(site_id, month, folder, prev, warnings, extras):
         content_rows.append({"title": a.get("title"), "page_url": full_url(site_id, a["path"]),
                              "published_on": str(pub) if pub else None, "topic": a.get("topic"), "index_status": st,
                              "impressions": d.get("gsc_impressions"), "clicks": d.get("gsc_clicks"),
-                             "position": d.get("gsc_position"), "sessions": d.get("ga_sessions"),
+                             "position": d.get("gsc_position"), "main_keyword": kw or None, "kw_position": k_pos,
+                             "kw_impressions": k_imp or None, "kw_clicks": sum(r["clicks"] for r in hit) if hit else None,
+                             "sessions": d.get("ga_sessions"),
                              "product_views": d.get("ga_items_viewed"), "purchases": d.get("ga_purchases")})
     content_rows.sort(key=lambda r: -(r["impressions"] or 0))
     topics = {}
@@ -557,8 +569,22 @@ def resolve_site(s):
 
 
 # ------------------------------------------------------------------ extras
-def load_extras(root, warnings):
-    ex = {"mapping": {}, "blog": {}, "ads": {}, "keywords": {}}
+def _date(v):
+    if hasattr(v, "date"):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if v:
+        try:
+            return date.fromisoformat(str(v)[:10].replace("/", "-"))
+        except ValueError:
+            return None
+    return None
+
+
+def load_extras(root, warnings, remote=None):
+    """remote = (content_by_site, keywords_by_site) from the dashboard database, or None."""
+    ex = {"mapping": {}, "blog": {}, "ads": {}, "keywords": {}, "source": {}}
     for sid in C.DEEP_SITES:
         f = first_file(root / "reference", f"{sid}_keyword_page_mapping*.csv", f"{sid}_mapping*.csv") if (root / "reference").exists() else None
         f = f or first_file(root, f"{sid}/keyword_page_mapping*.csv")
@@ -570,7 +596,13 @@ def load_extras(root, warnings):
                     m[str(r["kw"]).strip().lower()] = url_path(r["url"])
             ex["mapping"][sid] = m
         f = first_file(root, f"{sid}/keywords_monitor*.csv")
-        if f:
+        rk = (remote[1] or {}).get(sid) if remote else None
+        if rk:
+            rk = sorted(rk, key=lambda r: (r.get("sort_order") or 0, r["id"]))
+            ex["keywords"][sid] = {r["keyword"].strip().lower(): (url_path(r["target_url"]) if r.get("target_url") else None)
+                                   for r in rk}
+            ex["source"][sid + ":keywords"] = "看板关键词监控表"
+        elif f:
             ex["keywords"][sid] = {str(r["kw"]).strip().lower(): (url_path(r["url"]) if r.get("url") else None)
                                    for r in read_table_dicts(f, {"kw": ["keyword", "关键词"], "url": ["目标url", "target url", "url"]},
                                                              required=("kw",)) if r["kw"]}
@@ -582,8 +614,17 @@ def load_extras(root, warnings):
                                                             "cost": ["费用", "cost"], "conv": ["转化次数", "conversions"],
                                                             "value": ["转化价值", "conv. value", "conversion value"]},
                                                         required=("term", "conv")) if r["term"]]
+    rc = remote[0] if remote else None
+    if rc:
+        for sid, items in rc.items():
+            for r in sorted(items, key=lambda r: (r.get("sort_order") or 0, r["id"])):
+                ex["blog"].setdefault(sid, []).append({
+                    "path": url_path(r["url"]), "title": r.get("h1") or r.get("title") or r.get("title_cn"),
+                    "published_on": _date(r.get("published_on")), "topic": r.get("topic"),
+                    "main_keyword": r.get("main_keyword")})
+            ex["source"][sid + ":content"] = "看板内容追踪表"
     bf = first_file(root, "blog_articles*.csv", "blog_articles*.xlsx")
-    if bf:
+    if bf and not rc:
         for r in read_table_dicts(bf, {"url": ["url", "网址", "blog url"], "title": ["title", "标题", "文章话题"],
                                        "pub": ["published_on", "上线日期", "上传日期"], "topic": ["topic", "主题"],
                                        "site": ["site_id", "站点", "品牌"]}, required=("url",)):
@@ -616,11 +657,16 @@ def load_prev(path):
 
 
 # ------------------------------------------------------------------ entry point
-def run(month, input_dir, out_dir, prev_path=None, publish=True):
+def run(month, input_dir, out_dir, prev_path=None, publish=True, offline=False):
     root = Path(input_dir)
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
     warnings, errors, snaps = [], [], []
-    extras = load_extras(root, warnings)
+    remote = None
+    if not offline:
+        from .remote import load_lists
+        remote = load_lists(warnings)
+    extras = load_extras(root, warnings, remote if remote and remote[0] is not None else None)
+    indexed = {}
     prev = load_prev(prev_path)
     site_totals = {}
     for sid in C.DEEP_SITES:
@@ -634,6 +680,12 @@ def run(month, input_dir, out_dir, prev_path=None, publish=True):
             errors.append(str(e))
             continue
         site_totals[sid] = {**sections["overview"]["gsc"], "source": "GSC 效果报告"}
+        ix = indexed.setdefault(sid, {})
+        for r in sections["content"]["rows"]:
+            st = r.get("index_status") or ""
+            v = "是" if st.startswith("有曝光") else "否" if ("已发现" in st or "已抓取" in st or "未编入" in st) else None
+            if v:
+                ix[base_path(url_path(r["page_url"]))] = v
         for sec, payload in sections.items():
             snaps.append({"site_id": sid, "month": month + "-01", "section": sec, "published": publish,
                           "payload": payload, "provenance": prov})
@@ -649,6 +701,13 @@ def run(month, input_dir, out_dir, prev_path=None, publish=True):
                 site_totals[sid] = {**g["totals"], "source": "GSC 效果报告"}
             except InputError as e:
                 errors.append(str(e))
+    from .blog_summary import SITES as BLOG_SITES, build as build_blog
+    for sid in BLOG_SITES:
+        payload, files = build_blog(sid, root / "blog_summary" / sid, warnings, indexed.get(sid))
+        if payload is not None:
+            snaps.append({"site_id": sid, "month": month + "-01", "section": "blog_summary", "published": publish,
+                          "payload": payload, "provenance": {"files": files, "date_range": payload.get("date_range"),
+                                                             "indexed": "GSC 未编入索引导出 + 当月曝光" if payload.get("indexed") else None}})
     try:
         monthly = build_monthly(month, root, site_totals, warnings)
     except InputError as e:
@@ -673,8 +732,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--prev", help="上月 import.json，用于环比、下滑页面和关键词上月排名")
     ap.add_argument("--draft", action="store_true", help="导入为草稿（仅管理员可见）")
+    ap.add_argument("--offline", action="store_true", help="不读取看板数据库，内容和关键词列表改用本地 CSV")
     a = ap.parse_args()
-    snaps, warnings, errors = run(a.month, a.input, a.out, a.prev, publish=not a.draft)
+    snaps, warnings, errors = run(a.month, a.input, a.out, a.prev, publish=not a.draft, offline=a.offline)
     print(f"快照 {len(snaps)} 份，提醒 {len(warnings)} 条，错误 {len(errors)} 条。详见 {a.out}/report.md")
     for e in errors:
         print("错误：", e)

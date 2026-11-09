@@ -1,8 +1,8 @@
 'use strict';
 const $=id=>document.getElementById(id);
-const pages={overview:'总览',opportunities:'机会清单',keywords:'关键词监控',content:'内容追踪',optimizations:'优化记录',monthly:'月度数据表'};
-const state={page:'overview',sites:[],snapshots:[],records:[],session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
-const SECTIONS=['overview','opportunities','keywords','content','monthly','pages'];
+const pages={overview:'总览',opportunities:'机会清单',keywords:'关键词监控',content:'内容追踪',optimizations:'优化记录',monthly:'月度数据表',blog:'博客数据总结表'};
+const state={page:'overview',sites:[],snapshots:[],records:[],content:[],keywords:[],overrides:[],session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
+const SECTIONS=['overview','opportunities','keywords','content','monthly','pages','blog_summary'];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=0)=>v==null||Number.isNaN(+v)?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:d});
 const percent=(v,d=2)=>v==null?'—':`${fmt(v*100,d)}%`;
@@ -89,17 +89,193 @@ function opportunities(){
  return panel('待处理机会',chips+table([['priority','优先级','prio'],['category','类型'],['page_url','页面','url'],['query','查询词'],['impressions','曝光'],['clicks','点击'],['ctr','点击率','pct'],['position','排名','pos'],['sessions','自然会话'],['purchases','订单'],['evidence','判断依据'],['action','建议动作']],data))
  +panel('判断口径','<ul class="rule-list"><li>核心页面：自然点击前 10，环比跌幅超过 20% 标为高优先级。</li><li>下滑页面：上月点击 ≥20 且下降 ≥20%，按“排名下降 / 点击率下降 / 曝光下降”判断原因，只作排查线索。</li><li>排名 11–20：平均排名 10.5–20.5；曝光门槛 Autel ≥80，Launch 与美国站 ≥30；排除小语种页面。</li><li>点击率偏低：排除购物类长标题查询后，低于本站同排名段平均值的 60%；通用参考值（第 1–3 名 15–30%、4–7 名 5–10%、8–10 名 2–5%）仅作对照。</li><li>错位与机会词：对照关键词归属表。</li><li>互动差：自然会话 ≥20，且平均互动时长低于全站一半或互动率 <50%。</li><li>转化：与本站自然流量整体转化率比较。</li><li>未收录：GSC 导出当天的快照。</li></ul>')+source(s);}
 
-// ---------------------------------------------------------------- keywords
-function keywords(){const s=snapshot('keywords');const rs=(s?.payload?.rows||[]).map(r=>({...r,move:r.position!=null&&r.previous_position!=null?r.previous_position-r.position:null}));
- const c={};rs.forEach(r=>c[r.status]=(c[r.status]||0)+1);
- const sum=rs.length?`<div class="status-line">${Object.entries(c).map(([k,v])=>`<span class="badge ${k==='一致'?'':'pending'}">${esc(k)} ${v}</span>`).join('')}</div>`:'';
- return panel('目标词及页面归属',sum+table([['query','关键词'],['position','本月排名','pos'],['previous_position','上月排名','pos'],['move','排名变化','pos'],['impressions','曝光'],['clicks','点击'],['ctr','点击率','pct'],['status','归属状态','badge'],['actual_url','实际页面','url'],['planned_url','规划页面','url']],filtered(rs)))+'<p class="hint">排名变化为正数表示上升。排名取曝光最多的那个页面的平均排名。</p>'+source(s);}
+// ---------------------------------------------------------------- editable cells (shared)
+const pathOf=u=>{try{const x=new URL(u,'https://x.invalid');return (decodeURI(x.pathname).replace(/\/+$/,'')||'/').toLowerCase();}catch{return String(u||'').toLowerCase();}};
+const dur=v=>v==null?'':`${Math.floor(v/60)} 分 ${String(Math.round(v%60)).padStart(2,'0')} 秒`;
+const durCopy=v=>{if(v==null)return '';v=Math.round(v);return `${Math.floor(v/3600)}:${String(Math.floor(v%3600/60)).padStart(2,'0')}:${String(v%60).padStart(2,'0')}`;};
+function ovMap(grid,siteId,m){const o={};state.overrides.filter(x=>x.grid===grid&&x.site_id===siteId&&x.month===m).forEach(x=>{(o[x.row_key]??={})[x.col]=x.value;});return o;}
+function edAttr(kind,{id='',col,type='text',row='',site='',grid='',trigger='dbl'}){return ` data-ed="${kind}" data-trigger="${trigger}" data-id="${esc(id)}" data-col="${esc(col)}" data-type="${type}" data-row="${esc(row)}" data-site="${esc(site)}" data-grid="${esc(grid)}"`;}
+function parseDur(v){let m;if((m=v.match(/^(\d+)\s*分\s*(\d+)\s*秒$/)))return +m[1]*60+ +m[2];if((m=v.match(/^(\d+)\s*秒$/)))return +m[1];if((m=v.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/)))return m[3]!=null?+m[1]*3600+ +m[2]*60+ +m[3]:+m[1]*60+ +m[2];if(/^\d+(\.\d+)?$/.test(v))return Math.round(+v);throw Error('时长可以写成 1:27、0:01:27、87（秒）或 1 分 27 秒');}
+const PARSE={
+ int:v=>{const n=Number(v.replace(/[,\s，]/g,''));if(!Number.isInteger(n)||n<0)throw Error('请输入不小于 0 的整数');return n;},
+ num:v=>{const n=Number(v.replace(/[,\s，$]/g,''));if(!Number.isFinite(n))throw Error('请输入数字');return n;},
+ pct:v=>{const t=v.replace(/\s/g,'');const n=t.endsWith('%')?Number(t.slice(0,-1))/100:Number(t);if(!Number.isFinite(n))throw Error('请输入百分比，例如 2.5% 或 0.025');return n;},
+ pos:v=>{const n=Number(v);if(!Number.isFinite(n)||n<=0)throw Error('排名请输入大于 0 的数字');return n;},
+ dur:parseDur,
+ date:v=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(v))throw Error('日期格式为 YYYY-MM-DD');return v;},
+ text:v=>v,long:v=>v,
+ url:(v,ds)=>{const s=state.sites.find(x=>x.id===ds.site)||site();const u=new URL(v.startsWith('/')?'https://'+s.domain+v:v);if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,''))throw Error(`网址必须是 https://${s.domain} 下的页面`);return u.href;}};
+function startEdit(td,ev){
+ if(ev&&ev.target.closest('a')&&td.dataset.trigger==='click')return;
+ if(!state.admin){message('登录管理员后可以编辑单元格。');return;}
+ if(td.querySelector('.cell-input'))return;
+ const type=td.dataset.type,cur=td.dataset.raw??'',long=type==='long';
+ const el=document.createElement(long?'textarea':'input');el.className='cell-input';if(type==='date')el.type='date';el.value=cur;
+ td.classList.add('editing');td.innerHTML='';td.appendChild(el);el.focus();if(type!=='date'&&el.select)el.select();
+ let done=false;const finish=async save=>{if(done)return;done=true;const v=el.value.trim();if(!save||v===cur.trim()){render();return;}td.classList.add('saving');try{await saveCell(td.dataset,v);}catch(e){message(e.message,true);}render();};
+ el.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();finish(false);}else if(e.key==='Enter'&&(!long||e.ctrlKey||e.metaKey)){e.preventDefault();finish(true);}};
+ el.onblur=()=>finish(true);}
+async function saveCell(ds,raw){
+ const parse=PARSE[ds.type]||PARSE.text;
+ if(ds.ed==='content'||ds.ed==='keyword'){
+  const val=raw===''?null:parse(raw,ds);
+  if(val==null&&(ds.col==='url'||ds.col==='keyword'))throw Error(ds.col==='url'?'网址不能为空':'关键词不能为空');
+  const table=ds.ed==='content'?'seo_content':'seo_keywords',list=ds.ed==='content'?state.content:state.keywords;
+  const [row]=await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(ds.id)}`,{method:'PATCH',auth:true,body:{[ds.col]:val},prefer:'return=representation'});
+  const i=list.findIndex(x=>String(x.id)===ds.id);if(row&&i>=0)list[i]=row;
+ }else{
+  const key={grid:ds.grid,site_id:ds.site,month:month(),row_key:ds.row,col:ds.col};
+  const same=o=>o.grid===key.grid&&o.site_id===key.site_id&&o.month===key.month&&o.row_key===key.row_key&&o.col===key.col;
+  if(raw===''){await request('/rest/v1/seo_cell_overrides?'+Object.entries(key).map(([k,v])=>`${k}=eq.${encodeURIComponent(v)}`).join('&'),{method:'DELETE',auth:true});state.overrides=state.overrides.filter(o=>!same(o));message('已清除手动值，恢复为导入的数据。');return;}
+  const value=raw==='-'||raw==='—'?'':String(parse(raw,ds));
+  const [row]=await request('/rest/v1/seo_cell_overrides?on_conflict=grid,site_id,month,row_key,col',{method:'POST',auth:true,body:{...key,value},prefer:'resolution=merge-duplicates,return=representation'});
+  state.overrides=state.overrides.filter(o=>!same(o));if(row)state.overrides.push(row);
+ }
+ message('已保存。');}
+function editTable(cols,data,{emptyTitle,emptyDetail,cls=''}={}){
+ if(!data.length)return empty(emptyTitle,emptyDetail);
+ return `<div class="table-wrap"><table class="edit-table ${cls}"><thead><tr>`+cols.map(c=>`<th class="${c.cls||''}">${esc(c.label)}</th>`).join('')+'</tr></thead><tbody>'+data.map(r=>'<tr>'+cols.map(c=>{const x=c.cell(r)||{};const k=[c.cls,x.cls,x.ed&&state.admin?'editable':'',x.ov?'ov':''].filter(Boolean).join(' ');
+  return `<td class="${k}"${x.ed?x.ed+` data-raw="${esc(x.raw??'')}"`:''}${x.title||x.ov?` title="${esc(x.title||'手动填写的值；清空后恢复为导入的数据')}"`:''}>${x.html??''}</td>`;}).join('')+'</tr>').join('')+'</tbody></table></div>';}
+const urlCell=v=>v?`<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(decodeURI(v.replace(/^https:\/\/[^/]+/,''))||'/')}</a>`:'';
+const lenNote=v=>v?` <small class="len">${[...v].length}</small>`:'';
 
-// ---------------------------------------------------------------- content
-function content(){const s=snapshot('content');const t=s?.payload?.topics||[];
- return (t.length?panel('主题表现（按篇均点击排序）',table([['topic','主题'],['articles','文章数'],['impressions','曝光'],['clicks','点击'],['clicks_per_article','篇均点击'],['sessions','自然会话']],t)):'')
- +panel('文章表现',table([['title','文章'],['page_url','网址','url'],['published_on','上线日期'],['index_status','收录状态','badge'],['impressions','曝光'],['clicks','点击'],['position','排名','pos'],['sessions','自然会话'],['product_views','商品浏览'],['purchases','订单']],filtered(s?.payload?.rows||[])))
- +'<p class="hint">选题、写作与审核继续在原文章库管理。上线超过 3 周仍无曝光，作为抽查线索，不等同于确认未收录。</p>'+source(s);}
+// ---------------------------------------------------------------- keywords (monitor list)
+function kwMetrics(siteId,m){const map={};(snapshot('keywords',siteId,m)?.payload?.rows||[]).forEach(r=>map[String(r.query).trim().toLowerCase()]=r);return map;}
+function keywords(){
+ const sid=$('site').value,m=month(),cur=kwMetrics(sid,m),prev=kwMetrics(sid,shiftMonth(m,-1)),O=ovMap('keywords',sid,m),Op=ovMap('keywords',sid,shiftMonth(m,-1));
+ const list=state.keywords.filter(k=>k.site_id===sid).sort((a,b)=>(a.sort_order-b.sort_order)||(a.id-b.id));
+ const num=(o,k,f)=>o?.[k]!==undefined?{v:o[k]===''?null:Number(o[k]),ov:true}:{v:f??null,ov:false};
+ const rowsData=filtered(list.map(k=>{const q=k.keyword.trim().toLowerCase(),c=cur[q],p=prev[q],o=O[q],op=Op[q];
+  const clicks=num(o,'clicks',c?.clicks),ctr=num(o,'ctr',c?.ctr??(c?.impressions?c.clicks/c.impressions:null)),pos=num(o,'position',c?.position);
+  const pp=num(o,'prev_position',num(op,'position',p?.position??c?.previous_position).v);
+  return {k,q,keyword:k.keyword,target:k.target_url,volume:k.volume,clicks,ctr,pos,pp,actual:c?.actual_url,status:c?.status};}));
+ const hasPrev=!!snapshot('keywords',sid,shiftMonth(m,-1));
+ const trend=r=>{const a=r.pos.v,b=r.pp.v;if(a==null)return '<span class="muted">本月无数据</span>';if(b==null)return hasPrev?'<span class="badge">新进入</span>':'<span class="muted">—</span>';const d=b-a;if(Math.abs(d)<1)return '<span class="muted">→ 持平</span>';return d>0?`<span class="positive">↑ ${fmt(d,1)}</span>`:`<span class="negative">↓ ${fmt(-d,1)}</span>`;};
+ const E=(r,col,type,trigger='click')=>edAttr(col==='keyword'||col==='target_url'||col==='volume'?'keyword':'ov',{id:r.k.id,col,type,row:r.q,site:sid,grid:'keywords',trigger});
+ const cols=[
+  {label:'关键词',cell:r=>({html:esc(r.keyword),raw:r.keyword,ed:E(r,'keyword','text')})},
+  {label:'目标页面',cell:r=>({html:urlCell(r.target)+(r.status==='错位'&&r.actual?`<br><small class="muted">实际排名页：${esc(decodeURI(r.actual.replace(/^https:\/\/[^/]+/,'')))}</small>`:''),raw:r.target||'',ed:E(r,'target_url','url')})},
+  {label:'搜索量',cls:'nw num',cell:r=>({html:r.volume==null?'':fmt(r.volume),raw:r.volume??'',ed:E(r,'volume','int')})},
+  {label:'点击量',cls:'nw num',cell:r=>({html:r.clicks.v==null?'':fmt(r.clicks.v),raw:r.clicks.v??'',ed:E(r,'clicks','int'),ov:r.clicks.ov})},
+  {label:'点击率',cls:'nw num',cell:r=>({html:r.ctr.v==null?'':percent(r.ctr.v),raw:r.ctr.v==null?'':fmt(r.ctr.v*100,2)+'%',ed:E(r,'ctr','pct'),ov:r.ctr.ov})},
+  {label:'当前排名',cls:'nw num',cell:r=>({html:r.pos.v==null?'':fmt(r.pos.v,1),raw:r.pos.v??'',ed:E(r,'position','pos'),ov:r.pos.ov})},
+  {label:'上月排名',cls:'nw num',cell:r=>({html:r.pp.v==null?'':fmt(r.pp.v,1),raw:r.pp.v??'',ed:E(r,'prev_position','pos'),ov:r.pp.ov})},
+  {label:'趋势',cls:'nw',cell:r=>({html:trend(r)})}];
+ if(state.admin)cols.push({label:'',cls:'nw',cell:r=>({html:`<button class="link danger" data-del-kw="${r.k.id}">删除</button>`})});
+ const add=state.admin?`<form id="kw-add" class="inline-add"><input name="keyword" placeholder="新关键词" required maxlength="300"><input name="target_url" placeholder="目标页面（网址或 /路径，可留空）"><input name="volume" placeholder="搜索量（可留空）" inputmode="numeric"><button class="primary" type="submit">添加</button></form>`:'';
+ const s=snapshot('keywords');
+ return panel(`核心关键词（${list.length} 个）`,`<p class="hint">建议保持 20–50 个最重要的词。${state.admin?'单击单元格即可编辑，回车或点到别处保存，Esc 取消。点击量、点击率和排名每月导入后自动更新；手动改过的格子标为浅黄色，清空即恢复为导入数据，填“-”表示留空。':'登录管理员后可编辑。'}</p>`+add+editTable(cols,rowsData,{emptyTitle:'还没有关键词',emptyDetail:'管理员登录后在上方添加。'}))
+ +`<p class="hint">点击量、点击率、排名来自当月 GSC 查询词×着陆页明细，排名取曝光最多的那个页面的平均排名；上月排名取上个月导入的数据。趋势按排名变化计算，变化不到 1 名记为持平。搜索量为手动维护（Semrush，美国库）。${s?'':' 本月还没有导入关键词数据。'}</p>`+source(s);}
+
+// ---------------------------------------------------------------- content tracking
+function latestOpt(siteId,url){const k=pathOf(url);let best=null;state.records.forEach(r=>{if(r.site_id===siteId&&pathOf(r.page_url)===k&&(!best||r.optimized_on>best))best=r.optimized_on;});return best;}
+function content(){
+ const sid=$('site').value,m=month(),cs=snapshot('content',sid,m),ps=snapshot('pages',sid,m);
+ const perf={};(cs?.payload?.rows||[]).forEach(r=>perf[pathOf(r.page_url)]=r);
+ const pagePos={};(ps?.payload?.rows||[]).forEach(r=>{const k=pathOf(r.path);if(!(k in pagePos))pagePos[k]=r.gsc_position;});
+ const list=state.content.filter(c=>c.site_id===sid).sort((a,b)=>(a.sort_order-b.sort_order)||(a.id-b.id));
+ const data=filtered(list.map(c=>({...c,_opt:latestOpt(sid,c.url)})));
+ const E=(r,col,type)=>edAttr('content',{id:r.id,col,type,site:sid});
+ const rank=r=>{const p=perf[pathOf(r.url)];if(p?.kw_position!=null)return {html:fmt(p.kw_position,1),title:`主关键词“${p.main_keyword}”在该页的平均排名（曝光 ${fmt(p.kw_impressions)}）`};
+  const pp=p?.position??pagePos[pathOf(r.url)];return pp!=null?{html:`${fmt(pp,1)} <small class="muted">页均</small>`,title:'主关键词本月在该页没有曝光，显示的是页面整体平均排名'}:{};};
+ const cols=[
+  {label:'H1 标题',cls:'w-l',cell:r=>({html:esc(r.h1||''),raw:r.h1||'',ed:E(r,'h1','long')})},
+  {label:'URL',cls:'w-m',cell:r=>({html:urlCell(r.url),raw:r.url,ed:E(r,'url','url')})},
+  {label:'主关键词',cls:'w-s',cell:r=>({html:esc(r.main_keyword||''),raw:r.main_keyword||'',ed:E(r,'main_keyword','text')})},
+  {label:'Title',cls:'w-l',cell:r=>({html:esc(r.title||'')+lenNote(r.title),raw:r.title||'',ed:E(r,'title','long')})},
+  {label:'Meta',cls:'w-xl',cell:r=>({html:esc(r.meta||'')+lenNote(r.meta),raw:r.meta||'',ed:E(r,'meta','long')})},
+  {label:'发布日期',cls:'nw',cell:r=>({html:esc(r.published_on||''),raw:r.published_on||'',ed:E(r,'published_on','date')})},
+  {label:'上次更新',cls:'nw',cell:r=>{const v=[r.last_updated,r._opt].filter(Boolean).sort().pop();return {html:esc(v||'')+(v&&v===r._opt&&v!==r.last_updated?' <small class="muted">优化记录</small>':''),raw:r.last_updated||'',ed:E(r,'last_updated','date'),title:r._opt?`优化记录里最近一次：${r._opt}`:''};}},
+  {label:'当前排名',cls:'nw num',cell:rank},
+  {label:'Outlinks',cls:'nw num',cell:r=>({html:r.outlinks??'',raw:r.outlinks??'',ed:E(r,'outlinks','int')})},
+  {label:'Inlinks',cls:'nw num',cell:r=>({html:r.inlinks??'',raw:r.inlinks??'',ed:E(r,'inlinks','int')})},
+  {label:'主题',cls:'w-s',cell:r=>({html:esc(r.topic||''),raw:r.topic||'',ed:E(r,'topic','text')})},
+  {label:'备注',cls:'w-m',cell:r=>({html:esc(r.notes||''),raw:r.notes||'',ed:E(r,'notes','long')})}];
+ if(state.admin)cols.push({label:'',cls:'nw',cell:r=>({html:`<button class="link danger" data-del-content="${r.id}">删除</button>`})});
+ const add=state.admin?`<form id="content-add" class="inline-add"><input name="url" placeholder="新文章网址 https://${esc(site()?.domain)}/blogs/…" required><input name="main_keyword" placeholder="主关键词（可留空）"><button class="primary" type="submit">添加一行</button></form>`:'';
+ const t=cs?.payload?.topics||[];
+ return panel(`内容追踪（${list.length} 篇）`,`<p class="hint">${state.admin?'双击单元格编辑：单行回车保存，多行文字按 Ctrl+Enter 或点到别处保存，Esc 取消。':'登录管理员后可双击单元格编辑。'}“上次更新”取手动填写的日期和优化记录里最近一次中较晚的那个。Title、Meta 后的小字是字符数。</p>`+add+editTable(cols,data,{emptyTitle:'还没有内容',emptyDetail:'管理员登录后在上方添加。',cls:'content-table'}))
+ +`<p class="hint">当前排名：优先显示主关键词在该页的 GSC 平均排名；主关键词本月没有曝光时，显示页面整体平均排名（标“页均”）。${cs?'':'本月还没有导入 GSC 数据，排名为空。'}主题对应博客计划表的“集群”，备注默认取“植入产品”。</p>`
+ +(t.length?panel('主题表现（按篇均点击排序）',table([['topic','主题'],['articles','文章数'],['impressions','曝光'],['clicks','点击'],['clicks_per_article','篇均点击'],['sessions','自然会话']],t)):'')+source(cs);}
+
+// ---------------------------------------------------------------- blog summary sheet (department format, columns A–N)
+const BLOG_BLOCKS=[{sid:'autelonline',brand:'AUTEL',idx:'/blogs/news',layout:'A'},{sid:'launchx431online',brand:'LAUNCH',idx:'/blogs/news',layout:'B'},{sid:'otofix',brand:'OTOFIX',idx:'/blogs/otofix-blog',layout:null}];
+const BS_HEAD=['品牌','上传日期','文章话题','URL','Blog URL','Word count 总词数','Stop Word count 停用词数','出词量','浏览次数','活跃用户','每位活跃用户的浏览量','每位活跃用户的平均互动时长','是否收录','是否请求编入索引'];
+const IDX_HEAD=['指数','活跃用户','会话数','关键事件数','总收入','感兴趣的会话数','每次会话的平均互动时长','每次会话的事件数','感兴趣的会话占比','事件数','会话关键事件率','跳出率'];
+const IDX_KEYS=[null,'users','sessions','key_events','revenue','engaged','eng_per_session','events_per_session','engaged_rate','events','key_event_rate','bounce'];
+const IDX_TYPES=[null,'int','int','int','money','int','dur','num2','pct','int','pct','pct'];
+function blogSheet(m){
+ const rows=[],blocks=[],mEnd=m.slice(0,8)+String(daysIn(m)).padStart(2,'0');
+ const C=(v,t='text',x={})=>({v,t,...x});
+ const add=(cells,cls='')=>{const row=Array.from({length:14},(_,i)=>cells[i]||C(null));row.cls=cls;row.n=rows.length+1;rows.push(row);return row.n;};
+ for(const b of BLOG_BLOCKS){
+  const st=state.sites.find(s=>s.id===b.sid);if(!st)continue;
+  const snap=snapshot('blog_summary',b.sid,m),p=snap?.payload||{},pages=p.pages||{},O=ovMap('blog_summary',b.sid,m);
+  const pick=(row,col,f,num=true)=>{const o=O[row]?.[col];return o===undefined?{v:f??null,ov:false}:{v:o===''?null:num?Number(o):o,ov:true};};
+  const OV=(row,col,type,o)=>({ed:edAttr('ov',{col,type,row,site:b.sid,grid:'blog_summary'}),raw:o.v==null?'':type==='dur'?durCopy(o.v):String(o.v),ov:o.ov});
+  const start=rows.length;add(BS_HEAD.map(h=>C(h,'head')),'head');
+  const list=state.content.filter(c=>c.site_id===b.sid&&pathOf(c.url).includes('/blogs/')&&pathOf(c.url)!==b.idx&&(c.published_on?c.published_on<=mEnd:!!pages[pathOf(c.url)])).sort((x,y)=>(x.sort_order-y.sort_order)||(x.id-y.id));
+  const items=[{path:b.idx,url:'https://'+st.domain+b.idx},...list.map(c=>({c,path:pathOf(c.url),url:c.url}))];
+  const first=rows.length+1;let sumV=0,sumU=0,sumLU=0,missing=0;
+  for(const d of items){const n=rows.length+1,pg=pages[d.path]||{},c=d.c;
+   const V=pick(d.path,'views',pg.views),U=pick(d.path,'users',pg.users),L=pick(d.path,'eng',pg.eng),X=pick(d.path,'indexed',p.indexed?.[d.path],false);
+   if(c&&V.v==null)missing++;sumV+=V.v||0;sumU+=U.v||0;sumLU+=(L.v||0)*(U.v||0);
+   const CE=(col,type,v)=>c?{ed:edAttr('content',{id:c.id,col,type,site:b.sid}),raw:v??''}:{};
+   add([C(b.brand),C(c?.published_on||null,'date',CE('published_on','date',c?.published_on)),C(c?.title_cn||null,'text',CE('title_cn','text',c?.title_cn)),C(d.path),C(d.url,'url'),
+    C(c?.word_count??null,'int',CE('word_count','int',c?.word_count)),C(c?.stop_words??null,'int',CE('stop_words','int',c?.stop_words)),
+    C(c?.word_count!=null&&c?.stop_words!=null?c.word_count-c.stop_words:null,'int',{f:`=IF(OR(F${n}="",G${n}=""),"",F${n}-G${n})`}),
+    C(V.v,'int',OV(d.path,'views','int',V)),C(U.v,'int',OV(d.path,'users','int',U)),C(V.v!=null&&U.v?V.v/U.v:null,'num2',{f:`=IFERROR(I${n}/J${n},"")`}),
+    C(L.v,'dur',OV(d.path,'eng','dur',L)),C(X.v||null,'text',OV(d.path,'indexed','text',X)),C(c?.index_requested||null,'text',CE('index_requested','text',c?.index_requested))],c?'':'idx');}
+  const last=rows.length,t=last+1,T=pick('__total','users',p.blog_users);
+  add([,,,,,,,C('总计','label'),C(sumV,'int',{f:`=SUM(I${first}:I${last})`}),C(T.v,'int',{...OV('__total','users','int',T),title:'博客页面去重活跃用户（GA4 网页和屏幕报告筛选 /blogs/ 后的总计），导出文件里没有，需要手动填写'}),
+   C(T.v?sumV/T.v:null,'num2',{f:`=IFERROR(I${t}/J${t},"")`}),C(T.v?sumLU/T.v:null,'dur',{f:`=IFERROR(SUMPRODUCT(L${first}:L${last},J${first}:J${last})/J${t},"")`}),C('页面用户累加(人次)','label'),C(sumU,'int',{f:`=SUM(J${first}:J${last})`})],'total');
+  const s=p.site||{},BV=pick('__site','views',s.views),BU=pick('__site','users',s.users),BK=pick('__site','vpu',s.vpu??(s.views&&s.users?Math.round(s.views/s.users*100)/100:null)),BL=pick('__site','eng',s.eng),bl=t+1;
+  add([,,,,,,,C('全站基准(GA4填)','label'),C(BV.v,'int',OV('__site','views','int',BV)),C(BU.v,'int',OV('__site','users','int',BU)),C(BK.v,'num2',OV('__site','vpu','num',BK)),C(BL.v,'dur',OV('__site','eng','dur',BL))],'base');
+  const kT=T.v?sumV/T.v:null,lT=T.v?sumLU/T.v:null,r=(a,b2)=>a!=null&&b2?a/b2:null;
+  add([,,,,,,,C('占比 / 对比','label'),C(r(sumV,BV.v),'share',{f:`=IF(I${bl}="","",I${t}/I${bl})`}),C(r(T.v,BU.v),'share',{f:`=IF(J${bl}="","",J${t}/J${bl})`}),
+   C(r(kT,BK.v)!=null?r(kT,BK.v)-1:null,'diff',{f:`=IF(K${bl}="","",K${t}/K${bl}-1)`}),C(r(lT,BL.v)!=null?r(lT,BL.v)-1:null,'diff',{f:`=IF(L${bl}="","",L${t}/L${bl}-1)`})],'ratio');
+  blocks.push({title:`${b.brand} 博客（${st.domain}）`,from:start,to:rows.length,snap,missing,articles:list.length});add([],'gap');}
+ for(const b of BLOG_BLOCKS.filter(x=>x.layout)){
+  const snap=snapshot('blog_summary',b.sid,m),acq=snap?.payload?.acq||{},O=ovMap('blog_summary',b.sid,m),start=rows.length,A=b.layout==='A';
+  add(IDX_HEAD.map((h,i)=>C(i===1&&!A?'':h,'head')),'head');
+  const lines=[];
+  for(const [rk,label] of [['__acq_blog','博客引流数据(GA4填)'],['__acq_site','全站基准(GA4填)']]){
+   const src=acq[rk==='__acq_blog'?'blog':'site']||{},n=rows.length+1,v={},ovs={};
+   IDX_KEYS.forEach(k=>{if(!k)return;const o=O[rk]?.[k];v[k]=o===undefined?src[k]??null:o===''?null:Number(o);ovs[k]=o!==undefined;});
+   const S=v.sessions,der=(k,val)=>ovs[k]?v[k]:val??v[k];
+   v.events_per_session=der('events_per_session',v.events!=null&&S?v.events/S:null);v.engaged_rate=der('engaged_rate',v.engaged!=null&&S?v.engaged/S:null);
+   v.key_event_rate=der('key_event_rate',v.key_events!=null&&S?v.key_events/S:null);v.bounce=der('bounce',v.engaged_rate!=null?1-v.engaged_rate:null);
+   const F={events_per_session:v.events!=null&&S&&!ovs.events_per_session?`=IFERROR(J${n}/C${n},"")`:null,engaged_rate:v.engaged!=null&&S&&!ovs.engaged_rate?`=IFERROR(F${n}/C${n},"")`:null,
+    key_event_rate:v.key_events!=null&&S&&!ovs.key_event_rate?`=IFERROR(D${n}/C${n},"")`:null,bounce:v.engaged_rate!=null&&!ovs.bounce?`=IFERROR(1-I${n},"")`:null};
+   const cells=IDX_KEYS.map((k,i)=>{if(!k)return C(rk==='__acq_blog'?b.brand:null);if(!A&&k==='users')return C(label,'label');
+    const t=IDX_TYPES[i],type=t==='money'||t==='num2'?'num':t;return C(v[k],t,{f:F[k]||undefined,ed:edAttr('ov',{col:k,type,row:rk,site:b.sid,grid:'blog_summary'}),raw:v[k]==null?'':t==='dur'?durCopy(v[k]):t==='pct'?fmt(v[k]*100,2)+'%':String(v[k]),ov:ovs[k]});});
+   if(A)cells[12]=C(label,'label');lines.push({n,v});add(cells,rk==='__acq_blog'?'':'base');}
+  const [bn,sn]=lines,rc=[];
+  IDX_KEYS.forEach((k,i)=>{if(!k){rc.push(C(null));return;}const col='ABCDEFGHIJKL'[i];if(!A&&k==='users'){rc.push(C('占比 / 对比','label'));return;}
+   const diff=['eng_per_session','events_per_session','engaged_rate','key_event_rate','bounce'].includes(k),a=bn.v[k],z=sn.v[k];
+   rc.push(C(a!=null&&z?a/z-(diff?1:0):null,diff?'diff':'share',{f:`=IF(${col}${sn.n}="","",${col}${bn.n}/${col}${sn.n}${diff?'-1':''})`}));});
+  if(A)rc[12]=C('占比 / 对比','label');add(rc,'ratio');
+  blocks.push({title:`指数 · ${b.brand}`,from:start,to:rows.length,snap,index:true});add([],'gap');}
+ rows.pop();return {rows,blocks};}
+function sheetDisplay(c){const v=c.v;if(v==null||v==='')return '';
+ switch(c.t){case 'int':return esc(fmt(v));case 'num2':return esc(fmt(v,2));case 'money':return esc(fmt(v,2));case 'dur':return esc(dur(v));case 'pct':return esc(percent(v));
+  case 'share':return esc('占总数的 '+percent(v));case 'diff':return esc(Math.abs(v)<5e-5?'与平均值持平':(v>0?'比平均值高 ':'比平均值低 ')+percent(Math.abs(v)));
+  case 'url':return urlCell(v);case 'date':return esc(v);default:return esc(v);}}
+function sheetCopy(c,formulas){if(formulas&&c.f)return c.f;const v=c.v;if(v==null||v==='')return '';
+ switch(c.t){case 'int':return String(Math.round(v));case 'num2':return String(Math.round(v*100)/100);case 'money':return String(Math.round(v*100)/100);case 'dur':return durCopy(v);
+  case 'pct':case 'share':case 'diff':return String(Math.round(v*10000)/10000);case 'date':{const [y,mo,d]=v.split('-');return `${y}/${+mo}/${+d}`;}default:return String(v).replace(/[\t\r\n]+/g,' ');}}
+function sheetTSV(rows,formulas=false){return rows.map(r=>r.cls==='gap'?'':r.map(c=>sheetCopy(c,formulas)).join('\t').replace(/\t+$/,'')).join('\n');}
+function blogSummary(){
+ const m=month(),{rows,blocks}=blogSheet(m);state.blogSheet={rows,blocks};
+ const render1=(r)=>`<tr class="${r.cls}">`+r.map((c,i)=>{const k=[c.t==='head'?'':isNumT(c.t)?'num':'',c.ed&&state.admin?'editable':'',c.ov?'ov':'',c.f&&!c.ed?'calc':''].filter(Boolean).join(' ');
+  const tag=c.t==='head'?'th':'td';return `<${tag} class="${k}"${c.ed?c.ed+` data-raw="${esc(c.raw??'')}"`:''}${c.title||c.ov?` title="${esc(c.title||'手动填写的值；清空后恢复为导入的数据')}"`:''}>${sheetDisplay(c)}</${tag}>`;}).join('')+'</tr>';
+ const letters='<tr class="letters">'+'ABCDEFGHIJKLMN'.split('').map(x=>`<td>${x}</td>`).join('')+'</tr>';
+ let html=panel('博客数据总结表',`<div class="topline"><p class="hint">格式与部门会议表一致（A–N 列，O 列以后不包含）。${state.admin?'双击白色格子可以编辑：文章信息改的是内容追踪表；浏览、用户、时长、收录、基准、指数改的是本月的手动值（浅黄色），清空即恢复为导入的数据，填“-”表示留空。':'登录管理员后可双击编辑。'}</p><div class="actions"><button id="copy-blog" class="primary">复制整表（数值）</button><button id="copy-blog-f">复制整表（含公式）</button></div></div>`
+  +'<p class="hint">“含公式”版本按粘贴到空白表格的 A1 计算行号；粘贴到会议表已有的位置时用“数值”版本，或用每块右上角的按钮只复制一块。灰色斜体的格子是公式算出来的。</p>');
+ blocks.forEach((b,i)=>{const s=b.snap;const meta=b.index?'':`${b.articles} 篇文章${b.missing?`，其中 ${b.missing} 篇缺浏览数据`:''}`;
+  html+=panel(esc(b.title),`<div class="topline"><p class="hint">${meta}${s?'':'本月还没有导入这部分数据。'}${s?.payload?.date_range?' 数据范围：'+esc(s.payload.date_range):''}</p><button data-copy-block="${i}">复制本块（数值）</button></div><div class="table-wrap"><table class="sheet">${letters}${rows.slice(b.from,b.to).map(render1).join('')}</table></div>`);});
+ return html+'<p class="hint">文章行来自内容追踪表：该站 /blogs/ 下、发布日期在本月月底以前的文章（没有发布日期但本月有浏览数据的也会列出）。浏览次数、活跃用户、每位活跃用户平均互动时长来自 GA4“网页和屏幕”报告；是否收录按 GSC 未编入索引导出和当月曝光判断；指数来自 GA4“流量获取”报告（博客行为着陆页包含 /blogs/ 的会话）。GA4 导出不带总计行，博客去重活跃用户、全站活跃用户和全站平均互动时长需要手动填写。</p>';}
+const isNumT=t=>['int','num2','money','dur','pct','share','diff'].includes(t);
 
 // ---------------------------------------------------------------- optimizations
 function pageRow(m,url){const s=snapshot('pages',$('site').value,m);if(!s)return undefined;const k=keyPath(url);return (s.payload.rows||[]).find(r=>keyPath(r.path)===k)||null;}
@@ -148,14 +324,24 @@ function adminPanel(){return panel('月度数据导入',`<p class="hint">导入�
 
 // ---------------------------------------------------------------- render
 function render(){
- $('page-title').textContent=pages[state.page];$('site-domain').textContent=state.page==='monthly'?'全部 12 个站点':site()?.domain||'';
+ const scroll=[...document.querySelectorAll('#content .table-wrap')].map(w=>w.scrollLeft);
+ $('page-title').textContent=pages[state.page];$('site-domain').textContent=state.page==='monthly'?'全部 12 个站点':state.page==='blog'?'Autel · Launch · Otofix 博客':site()?.domain||'';
  $('nav').innerHTML=Object.entries(pages).map(([k,v])=>`<button data-page="${k}" class="${k===state.page?'active':''}">${v}</button>`).join('');
  $('login-toggle').textContent=state.admin?'管理员 · 退出':'管理员登录';$('login-toggle').hidden=!!window.SEO_OFFLINE;$('export').hidden=!!window.SEO_OFFLINE;
- $('site').parentElement.hidden=state.page==='monthly';
+ $('site').parentElement.hidden=state.page==='monthly'||state.page==='blog';
  if(state.loading){$('content').innerHTML=empty('正在读取数据','请稍候');return;}
  if(state.error){$('content').innerHTML=empty('数据暂时无法读取',state.error);return;}
- const renderers={overview,opportunities,keywords,content,optimizations,monthly};
+ const renderers={overview,opportunities,keywords,content,optimizations,monthly,blog:blogSummary};
  $('content').innerHTML=renderers[state.page]()+(state.admin&&state.page==='monthly'?adminPanel():'');
+ document.querySelectorAll('#content .table-wrap').forEach((w,i)=>{if(scroll[i])w.scrollLeft=scroll[i];});
+ document.querySelectorAll('[data-ed]').forEach(td=>{td[td.dataset.trigger==='click'?'onclick':'ondblclick']=e=>startEdit(td,e);});
+ document.querySelectorAll('[data-del-kw]').forEach(b=>b.onclick=()=>deleteRow('seo_keywords',b.dataset.delKw));
+ document.querySelectorAll('[data-del-content]').forEach(b=>b.onclick=()=>deleteRow('seo_content',b.dataset.delContent));
+ if($('kw-add'))$('kw-add').onsubmit=addKeyword;
+ if($('content-add'))$('content-add').onsubmit=addContent;
+ if($('copy-blog'))$('copy-blog').onclick=()=>copyText(sheetTSV(state.blogSheet.rows),'已复制整表（数值），可直接粘贴到会议表。');
+ if($('copy-blog-f'))$('copy-blog-f').onclick=()=>copyText(sheetTSV(state.blogSheet.rows,true),'已复制整表（含公式），请粘贴到空白表格的 A1。');
+ document.querySelectorAll('[data-copy-block]').forEach(b=>b.onclick=()=>{const k=state.blogSheet.blocks[+b.dataset.copyBlock];copyText(sheetTSV(state.blogSheet.rows.slice(k.from,k.to)),'已复制“'+k.title+'”。');});
  document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{state.page=b.dataset.page;state.editing=null;render();});
  document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{state.oppCat=b.dataset.cat;render();});
  document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.editing=b.dataset.edit;render();window.scrollTo({top:0,behavior:'smooth'});});
@@ -169,7 +355,7 @@ function render(){
 async function copyText(text,ok){try{await navigator.clipboard.writeText(text);message(ok);}catch{message('浏览器未允许复制，请使用导出快照。',true);}}
 async function load(){const id=++state.loadId;state.loading=true;state.error=null;render();try{
  if(window.SEO_OFFLINE){Object.assign(state,window.SEO_OFFLINE);state.admin=false;state.session=null;}
- else {const [sites,snapshots,records]=await Promise.all([rows('seo_sites','select=*&order=sort_order'),paged('seo_snapshots','select=*&order=month.desc,id'),paged('seo_optimizations','select=*&order=optimized_on.desc,id')]);if(id!==state.loadId)return;state.sites=sites;state.snapshots=snapshots;state.records=records;}
+ else {const [sites,snapshots,records,content,keywords,overrides]=await Promise.all([rows('seo_sites','select=*&order=sort_order'),paged('seo_snapshots','select=*&order=month.desc,id'),paged('seo_optimizations','select=*&order=optimized_on.desc,id'),paged('seo_content','select=*&order=site_id,sort_order,id'),paged('seo_keywords','select=*&order=site_id,sort_order,id'),paged('seo_cell_overrides','select=*&order=id')]);if(id!==state.loadId)return;Object.assign(state,{sites,snapshots,records,content,keywords,overrides});}
  const selected=$('site').value;$('site').innerHTML=state.sites.filter(x=>x.deep_analysis).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');if(state.sites.some(x=>x.id===selected))$('site').value=selected;
  $('connection').textContent=window.SEO_OFFLINE?'离线快照':'数据库已连接';
  }catch(e){state.error=e.message;$('connection').textContent='连接失败';}finally{if(id===state.loadId){state.loading=false;render();}}}
@@ -179,6 +365,17 @@ async function saveRecord(event){event.preventDefault();const f=event.currentTar
  else await request('/rest/v1/seo_optimizations',{method:'POST',auth:true,body});
  message(state.editing?'优化记录已修改。':'优化记录已保存。');state.editing=null;await load();}catch(e){message(e.message,true);b.disabled=false;}}
 async function deleteRecord(id){const r=state.records.find(x=>x.id===id);if(!r||!confirm(`删除这条优化记录？\n${r.optimized_on} ${r.page_url}`))return;try{await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'DELETE',auth:true});message('已删除。');await load();}catch(e){message(e.message,true);}}
+async function deleteRow(table,id){const list=table==='seo_content'?state.content:state.keywords,r=list.find(x=>String(x.id)===String(id));if(!r||!confirm(`删除这一行？\n${r.keyword||r.url}`))return;
+ try{await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,{method:'DELETE',auth:true});list.splice(list.indexOf(r),1);message('已删除。');render();}catch(e){message(e.message,true);}}
+const nextOrder=list=>list.reduce((a,x)=>Math.max(a,x.sort_order||0),0)+1;
+async function addKeyword(e){e.preventDefault();const f=e.currentTarget,d=Object.fromEntries(new FormData(f)),sid=$('site').value;try{
+ const kw=d.keyword.trim();if(!kw)throw Error('请填写关键词');if(state.keywords.some(k=>k.site_id===sid&&k.keyword.trim().toLowerCase()===kw.toLowerCase()))throw Error('这个关键词已经在列表里了');
+ const body={site_id:sid,keyword:kw,target_url:d.target_url.trim()?PARSE.url(d.target_url.trim(),{site:sid}):null,volume:d.volume.trim()?PARSE.int(d.volume.trim()):null,sort_order:nextOrder(state.keywords.filter(k=>k.site_id===sid))};
+ const [row]=await request('/rest/v1/seo_keywords',{method:'POST',auth:true,body,prefer:'return=representation'});state.keywords.push(row);message('已添加关键词，下次导入月度数据后会自动带出点击和排名。');render();}catch(err){message(err.message,true);}}
+async function addContent(e){e.preventDefault();const f=e.currentTarget,d=Object.fromEntries(new FormData(f)),sid=$('site').value;try{
+ const url=PARSE.url(d.url.trim(),{site:sid});if(state.content.some(c=>c.site_id===sid&&pathOf(c.url)===pathOf(url)))throw Error('这个网址已经在表里了');
+ const [row]=await request('/rest/v1/seo_content',{method:'POST',auth:true,body:{site_id:sid,url,main_keyword:d.main_keyword.trim()||null,sort_order:nextOrder(state.content.filter(c=>c.site_id===sid))},prefer:'return=representation'});
+ state.content.push(row);message('已添加，双击各列补充信息。');render();}catch(err){message(err.message,true);}}
 let pendingImport=null;
 async function previewImport(){pendingImport=null;$('import-confirm').disabled=true;try{const file=$('import-file').files[0];if(!file)return;if(file.size>20*1024*1024)throw Error('文件超过 20MB，请分站点导入。');const data=JSON.parse(await file.text());if(!Array.isArray(data.snapshots)||!data.snapshots.length)throw Error('缺少 snapshots 数据。');const keys=new Set();for(const r of data.snapshots){if(!state.sites.some(s=>s.id===r.site_id)||!/^\d{4}-(0[1-9]|1[0-2])-01$/.test(r.month)||!SECTIONS.includes(r.section)||!r.payload||typeof r.payload!=='object'||Array.isArray(r.payload)||!r.provenance||typeof r.provenance!=='object'||typeof r.published!=='boolean')throw Error('存在无效站点、月份、页面或缺失的来源/发布状态。');const k=[r.site_id,r.month,r.section].join('|');if(keys.has(k))throw Error('同一个数据包存在重复站点、月份和页面。');keys.add(k);}
  pendingImport=data.snapshots;const months=[...new Set(pendingImport.map(x=>x.month.slice(0,7)))].join('、');$('import-preview').textContent=`待导入 ${pendingImport.length} 份快照（${months}），其中 ${pendingImport.filter(x=>x.published).length} 份将公开；同名快照将更新。`;$('import-confirm').disabled=false;$('import-confirm').onclick=commitImport;}catch(e){$('import-preview').textContent=e.message;}}
@@ -187,5 +384,5 @@ function download(name,content,type){const a=document.createElement('a'),u=URL.c
 $('site').onchange=()=>{message('');state.editing=null;render();};$('month').onchange=render;$('search').oninput=render;$('refresh').onclick=()=>{message('');load();};
 $('login-toggle').onclick=()=>{if(state.session){state.session=null;state.admin=false;message('已退出管理员。');load();}else $('login-dialog').showModal();};$('cancel-login').onclick=()=>$('login-dialog').close();
 $('login-form').onsubmit=async e=>{e.preventDefault();const b=e.currentTarget.querySelector('button[type=submit]');b.disabled=true;$('login-message').textContent='登录中…';try{state.session=await request('/auth/v1/token?grant_type=password',{method:'POST',body:{email:$('email').value,password:$('password').value}});state.admin=await request('/rest/v1/rpc/seo_is_admin',{method:'POST',auth:true,body:{}});$('password').value='';if(!state.admin){state.session=null;throw Error('该账号没有此看板的管理权限。');}$('login-dialog').close();message('已进入管理员模式，登录仅在本次页面会话保留。');await load();}catch(e){state.session=null;state.admin=false;$('login-message').textContent=e.message;}finally{b.disabled=false;}};
-$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:state.snapshots.filter(x=>x.published),records:state.records.filter(x=>x.published)};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
+$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:state.snapshots.filter(x=>x.published),records:state.records.filter(x=>x.published),content:state.content,keywords:state.keywords,overrides:state.overrides};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
 load();
