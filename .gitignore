@@ -1,0 +1,5 @@
+# 原始导出和处理结果不进仓库
+inputs/
+out/
+__pycache__/
+*.pyc
