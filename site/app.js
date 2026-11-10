@@ -94,9 +94,10 @@ const pathOf=u=>{try{const x=new URL(u,'https://x.invalid');return (decodeURI(x.
 const dur=v=>v==null?'':`${Math.floor(v/60)} 分 ${String(Math.round(v%60)).padStart(2,'0')} 秒`;
 const durCopy=v=>{if(v==null)return '';v=Math.round(v);return `${Math.floor(v/3600)}:${String(Math.floor(v%3600/60)).padStart(2,'0')}:${String(v%60).padStart(2,'0')}`;};
 function ovMap(grid,siteId,m){const o={};state.overrides.filter(x=>x.grid===grid&&x.site_id===siteId&&x.month===m).forEach(x=>{(o[x.row_key]??={})[x.col]=x.value;});return o;}
-function edAttr(kind,{id='',col,type='text',row='',site='',grid='',trigger='dbl'}){return ` data-ed="${kind}" data-trigger="${trigger}" data-id="${esc(id)}" data-col="${esc(col)}" data-type="${type}" data-row="${esc(row)}" data-site="${esc(site)}" data-grid="${esc(grid)}"`;}
+function edAttr(kind,{id='',col,type='text',row='',site='',grid='',trigger='dbl',month:mo=''}){return ` data-ed="${kind}" data-trigger="${trigger}" data-id="${esc(id)}" data-col="${esc(col)}" data-type="${type}" data-row="${esc(row)}" data-site="${esc(site)}" data-grid="${esc(grid)}" data-month="${esc(mo)}"`;}
 function parseDur(v){let m;if((m=v.match(/^(\d+)\s*分\s*(\d+)\s*秒$/)))return +m[1]*60+ +m[2];if((m=v.match(/^(\d+)\s*秒$/)))return +m[1];if((m=v.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/)))return m[3]!=null?+m[1]*3600+ +m[2]*60+ +m[3]:+m[1]*60+ +m[2];if(/^\d+(\.\d+)?$/.test(v))return Math.round(+v);throw Error('时长可以写成 1:27、0:01:27、87（秒）或 1 分 27 秒');}
 const PARSE={
+ mnum:v=>{const t=v.replace(/[,\s，]/g,'');const w=/^[\d.]+[wW万]$/.test(t);const n=Number(w?t.slice(0,-1):t);if(!Number.isFinite(n)||n<0)throw Error('请输入数字，曝光量可以写 1.06w');return w?Math.round(n*10000):n;},
  int:v=>{const n=Number(v.replace(/[,\s，]/g,''));if(!Number.isInteger(n)||n<0)throw Error('请输入不小于 0 的整数');return n;},
  num:v=>{const n=Number(v.replace(/[,\s，$]/g,''));if(!Number.isFinite(n))throw Error('请输入数字');return n;},
  pct:v=>{const t=v.replace(/\s/g,'');const n=t.endsWith('%')?Number(t.slice(0,-1))/100:Number(t);if(!Number.isFinite(n))throw Error('请输入百分比，例如 2.5% 或 0.025');return n;},
@@ -131,7 +132,7 @@ async function saveCell(ds,raw){
   const [row]=await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(ds.id)}`,{method:'PATCH',auth:true,body:{[ds.col]:val},prefer:'return=representation'});
   const i=list.findIndex(x=>String(x.id)===ds.id);if(row&&i>=0)list[i]=row;
  }else{
-  const key={grid:ds.grid,site_id:ds.site,month:month(),row_key:ds.row,col:ds.col};
+  const key={grid:ds.grid,site_id:ds.site,month:ds.month||month(),row_key:ds.row,col:ds.col};
   const same=o=>o.grid===key.grid&&o.site_id===key.site_id&&o.month===key.month&&o.row_key===key.row_key&&o.col===key.col;
   if(raw===''){await request('/rest/v1/seo_cell_overrides?'+Object.entries(key).map(([k,v])=>`${k}=eq.${encodeURIComponent(v)}`).join('&'),{method:'DELETE',auth:true});state.overrides=state.overrides.filter(o=>!same(o));message('已清除手动值，恢复为导入的数据。');return;}
   const value=raw==='-'||raw==='—'?'':String(parse(raw,ds));
@@ -309,25 +310,35 @@ function optimizations(){
 
 // ---------------------------------------------------------------- monthly (department format)
 const MONTHLY_ROWS=[['semrush_traffic','网站流量','Semrush（平均自然流量）'],['gsc_clicks',null,'GSC（点击量）'],['gsc_impressions',null,'GSC（曝光量）'],['ahrefs_traffic',null,'Ahrefs（平均自然流量）'],['rank_1_3','关键词','1-3 网站关键词（{t}）'],['rank_4_10',null,'4-10 网站关键词（{t}）'],['rank_11_20',null,'11-20网站关键词（{t}）'],['rank_21_50',null,'21-50网站关键词（{t}）'],['rank_51_plus',null,'51+网站关键词（{t}）'],['rank_total',null,'总数'],['page_optimization','Page优化','优化页面Title, Description, QA']];
-function monthlyValue(key,p,siteId,m){
+const RANK_KEYS=['rank_1_3','rank_4_10','rank_11_20','rank_21_50','rank_51_plus'];
+function monthlyRaw(key,p,siteId,m,O){
+ const o=O[key]?.value;if(o!==undefined)return {v:o===''?null:key==='page_optimization'?o:Number(o),ov:true};
+ if(key==='rank_total'){const vals=RANK_KEYS.map(k=>monthlyRaw(k,p,siteId,m,O)),any=vals.some(x=>x.v!=null);
+  if(any&&(vals.some(x=>x.ov)||p?.rank_total==null))return {v:vals.reduce((a,x)=>a+(x.v||0),0),calc:true};}
  let v=p?.[key];
- if(key==='page_optimization'&&(v==null||v==='')){const c={};state.records.filter(r=>r.site_id===siteId&&r.optimized_on.slice(0,7)===m.slice(0,7)).forEach(r=>c[r.category]=(c[r.category]||0)+1);v=Object.keys(c).length?Object.entries(c).map(([k,n])=>`${k} ${n} 页`).join('；'):null;}
+ if(key==='page_optimization'&&(v==null||v==='')){const c={};state.records.filter(r=>r.site_id===siteId&&r.optimized_on.slice(0,7)===m.slice(0,7)).forEach(r=>c[r.category]=(c[r.category]||0)+1);v=Object.keys(c).length?Object.entries(c).map(([k,n])=>`${k} ${n} 页`).join('；'):null;return {v,auto:v!=null};}
+ return {v:v===''?null:v??null};}
+function monthlyText(key,v){
  if(v==null||v==='')return '';
  if(key==='gsc_impressions'&&typeof v==='number'&&v>=10000)return (+(v/10000).toFixed(2))+'w';
  return typeof v==='number'?String(Math.round(v*100)/100):String(v);}
 function monthlyGrid(){
- const ms=[...new Set(state.snapshots.filter(x=>x.section==='monthly'&&x.month<=month()).map(x=>x.month))].sort().slice(-6);
- if(!ms.includes(month()))ms.push(month());
+ const ms=[...new Set([...state.snapshots.filter(x=>x.section==='monthly'&&x.month<=month()).map(x=>x.month),...state.overrides.filter(x=>x.grid==='monthly'&&x.month<=month()).map(x=>x.month)])].sort().slice(-6);
+ if(!ms.includes(month()))ms.push(month());ms.sort();
  const sites=[...state.sites].sort((a,b)=>a.sort_order-b.sort_order);
- const out=[];sites.forEach(s=>{const cur=snapshot('monthly',s.id)?.payload;const tool=cur?.rank_tool||'Semrush';
-  MONTHLY_ROWS.forEach(([k,cat,label],i)=>{const r={url:i===0?'https://'+s.domain+'/':'',cat:cat||'',label:label.replace('{t}',tool),key:k,site:s.id};ms.forEach(m=>r[m]=monthlyValue(k,snapshot('monthly',s.id,m)?.payload,s.id,m));out.push(r);});});
+ const out=[];sites.forEach(s=>{const cur=snapshot('monthly',s.id)?.payload;const tool=cur?.rank_tool||'Semrush';const O={};ms.forEach(m=>O[m]=ovMap('monthly',s.id,m));
+  MONTHLY_ROWS.forEach(([k,cat,label],i)=>{const r={url:i===0?'https://'+s.domain+'/':'',cat:cat||'',label:label.replace('{t}',tool),key:k,site:s.id,cells:{}};
+   ms.forEach(m=>{const x=monthlyRaw(k,snapshot('monthly',s.id,m)?.payload,s.id,m,O[m]);r.cells[m]=x;r[m]=monthlyText(k,x.v);});out.push(r);});});
  return {ms,out};}
 function monthly(){
  const {ms,out}=monthlyGrid();const cur=month();
  const head='<tr><th>网址</th><th>调研类目</th><th>工具/工作</th>'+ms.map(m=>`<th class="${m===cur?'current':''}">${esc(m.slice(0,7))}</th>`).join('')+'</tr>';
- const body=out.map((r,i)=>`<tr class="${i%11===0?'group-start':''}"><td>${esc(r.url)}</td><td>${esc(r.cat)}</td><td>${esc(r.label)}</td>`+ms.map(m=>`<td class="${m===cur?'current':''}">${esc(r[m])}</td>`).join('')+'</tr>').join('');
+ const body=out.map((r,i)=>`<tr class="${i%11===0?'group-start':''}"><td>${esc(r.url)}</td><td>${esc(r.cat)}</td><td>${esc(r.label)}</td>`+ms.map(m=>{const x=r.cells[m],type=r.key==='page_optimization'?'text':'mnum';
+  const tip=x.ov?'手动填写的值；清空后恢复为导入的数据':x.calc?'自动计算：五个排名区间相加（手动填写可覆盖）':x.auto?'按当月优化记录自动汇总（手动填写可覆盖）':'';
+  const raw=x.ov?(x.v==null?'-':String(x.v)):'';
+  return `<td class="${[m===cur?'current':'',state.admin?'editable':'',x.ov?'ov':'',x.calc||x.auto?'calc':''].filter(Boolean).join(' ')}"${edAttr('ov',{col:'value',type,row:r.key,site:r.site,grid:'monthly',month:m})} data-raw="${esc(x.ov?raw:(x.v==null||x.auto?'':String(x.v)))}"${tip?` title="${esc(tip)}"`:''}>${esc(r[m])}</td>`;}).join('')+'</tr>').join('');
  const missing=out.filter(r=>r[cur]===''&&!['ahrefs_traffic','page_optimization'].includes(r.key)).length;
- return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
+ return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。${state.admin?'双击数值格可以直接填写，点“更新”保存、“取消”放弃；曝光量可以写 1.06w 或 10600。要填新月份，先在上方“月份”里选那个月。':'登录管理员后可双击数值格填写。'}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
  +'<p class="hint">粘贴方法：在部门表格里选中新月份列的第一个数据格（第 2 行），直接粘贴。“Page优化”一行没有手工填写时，按当月优化记录自动汇总。2026 年 10 月起关键词排名分布统一用 Semrush，与之前的 Ahrefs 数据不可直接比较；Semrush 流量如为月末快照，以数据来源说明为准。</p>';}
 
 // ---------------------------------------------------------------- admin import
