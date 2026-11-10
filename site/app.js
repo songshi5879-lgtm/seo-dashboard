@@ -60,7 +60,7 @@ function overview(){
  const go=p.ga4?.google_organic||{},ai=p.ga4?.ai||{},pgo=prev.ga4?.google_organic||{},pai=prev.ga4?.ai||{};
  html+=`<div class="cards">${card('其中 Google 自然搜索',fmt(go.sessions)+' <small>会话</small>',`订单 ${fmt(go.purchases)}，收入 $${fmt(go.revenue,0)}；${mom(go.sessions,pgo.sessions,m,{daily:false})}`)}
  ${card('其中 AI 助手',fmt(ai.sessions)+' <small>会话</small>',`订单 ${fmt(ai.purchases)}，收入 $${fmt(ai.revenue,0)}；${mom(ai.sessions,pai.sessions,m,{daily:false})}`)}
- ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions?fmt(go.sessions/g.clicks,2):'—','正常约 1.4–1.6，明显偏离时检查渠道归类')}
+ ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions?fmt(go.sessions/g.clicks,2):'—','会话与点击口径不同，无统一正常范围')}
  ${card('数据提醒',String((p.checks||[]).length),(p.checks||[]).map(esc).join('<br>')||'无')}</div>`;
  html+=panel('月度趋势',trendTable());
  html+=panel('自然渠道汇总',table([['channel','渠道'],['sessions','会话'],['purchases','订单'],['revenue','收入','money'],['conversion','转化率','pct']],p.ga4?.by_channel||[]));
@@ -69,13 +69,13 @@ function overview(){
  return html+source(s);
 }
 function trendTable(){
- const sid=$('site').value,ms=[...new Set(state.snapshots.filter(x=>x.site_id===sid&&(x.section==='overview'||x.section==='monthly')&&x.month<=month()).map(x=>x.month))].sort().slice(-12);
+ const sid=$('site').value,ms=[...new Set([...state.snapshots.filter(x=>x.site_id===sid&&(x.section==='overview'||x.section==='monthly')&&x.month<=month()).map(x=>x.month),...state.overrides.filter(x=>x.site_id===sid&&x.grid==='monthly'&&x.month<=month()).map(x=>x.month)])].sort().slice(-12);
  if(!ms.length)return empty('趋势待导入','导入两个月以上的数据后显示按月趋势。');
- const data=ms.map(m=>{const o=snapshot('overview',sid,m)?.payload||{},mo=snapshot('monthly',sid,m)?.payload||{};const g=o.gsc||{},n=o.ga4?.organic||{};
-  return {month:m.slice(0,7),clicks:g.clicks??mo.gsc_clicks,impr:g.impressions??mo.gsc_impressions,ctr:g.ctr,pos:g.position,sessions:n.sessions,orders:n.purchases,revenue:n.revenue,ai:o.ga4?.ai?.sessions,kw:mo.rank_total,kwtool:mo.rank_tool};});
+ const data=ms.map(m=>{const o=snapshot('overview',sid,m)?.payload||{},mo=snapshot('monthly',sid,m)?.payload||{};const g=o.gsc||{},n=o.ga4?.organic||{},O=ovMap('monthly',sid,m),kw=monthlyRaw('rank_total',mo,sid,m,O).v;
+  return {month:m.slice(0,7),clicks:g.clicks??monthlyRaw('gsc_clicks',mo,sid,m,O).v,impr:g.impressions??monthlyRaw('gsc_impressions',mo,sid,m,O).v,ctr:g.ctr,pos:g.position,sessions:n.sessions,orders:n.purchases,revenue:n.revenue,ai:o.ga4?.ai?.sessions,kw,kwtool:kw==null?null:'Semrush'};});
  const max=Math.max(1,...data.map(d=>d.clicks||0));
  const bars=`<div class="bars" role="img" aria-label="GSC 点击按月趋势">${data.map(d=>`<div class="bar-item"><strong>${fmt(d.clicks)}</strong><div class="bar" style="height:${Math.max(2,(d.clicks||0)/max*120)}px"></div>${esc(d.month)}</div>`).join('')}</div>`;
- return bars+table([['month','月份'],['clicks','GSC 点击'],['impr','GSC 曝光'],['ctr','点击率','pct'],['pos','平均排名','pos'],['sessions','自然会话'],['orders','订单'],['revenue','收入','money'],['ai','AI 会话'],['kw','关键词总数'],['kwtool','排名工具']],data)+'<p class="hint">2026 年 10 月起关键词总数改用 Semrush，与之前的 Ahrefs 数据不可直接比较。8–9 月为回填数据，部分指标缺失。</p>';
+ return bars+table([['month','月份'],['clicks','GSC 点击'],['impr','GSC 曝光'],['ctr','点击率','pct'],['pos','平均排名','pos'],['sessions','自然会话'],['orders','订单'],['revenue','收入','money'],['ai','AI 会话'],['kw','关键词总数'],['kwtool','排名工具']],data)+'<p class="hint">关键词总数各月均使用 Semrush，与月度数据表同步，手填值优先。9 月着陆页 GA4 明细仅覆盖 9 月 9–30 日；总览会话、订单和收入使用整月流量获取数据。</p>';
 }
 
 // ---------------------------------------------------------------- opportunities
@@ -364,7 +364,7 @@ function monthlyGrid(){
  const ms=[...new Set([...state.snapshots.filter(x=>x.section==='monthly'&&x.month<=month()).map(x=>x.month),...state.overrides.filter(x=>x.grid==='monthly'&&x.month<=month()).map(x=>x.month)])].sort().slice(-6);
  if(!ms.includes(month()))ms.push(month());ms.sort();
  const sites=[...state.sites].sort((a,b)=>a.sort_order-b.sort_order);
- const out=[];sites.forEach(s=>{const cur=snapshot('monthly',s.id)?.payload;const tool=cur?.rank_tool||'Semrush';const O={};ms.forEach(m=>O[m]=ovMap('monthly',s.id,m));
+ const out=[];sites.forEach(s=>{const tool='Semrush';const O={};ms.forEach(m=>O[m]=ovMap('monthly',s.id,m));
   MONTHLY_ROWS.forEach(([k,cat,label],i)=>{const r={url:i===0?'https://'+s.domain+'/':'',cat:cat||'',label:label.replace('{t}',tool),key:k,site:s.id,cells:{}};
    ms.forEach(m=>{const x=monthlyRaw(k,snapshot('monthly',s.id,m)?.payload,s.id,m,O[m]);r.cells[m]=x;r[m]=monthlyText(k,x.v);});out.push(r);});});
  return {ms,out};}
@@ -377,7 +377,7 @@ function monthly(){
   return `<td class="${[m===cur?'current':'',state.admin?'editable':'',x.ov?'ov':'',x.calc||x.auto?'calc':''].filter(Boolean).join(' ')}"${edAttr('ov',{col:'value',type,row:r.key,site:r.site,grid:'monthly',month:m})} data-raw="${esc(x.ov?raw:(x.v==null||x.auto?'':String(x.v)))}"${tip?` title="${esc(tip)}"`:''}>${esc(r[m])}</td>`;}).join('')+'</tr>').join('');
  const missing=out.filter(r=>r[cur]===''&&!['ahrefs_traffic','page_optimization'].includes(r.key)).length;
  return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。${state.admin?'双击数值格填写，可以连续填多格，填完点上方“更新”一次保存；曝光量可以写 1.06w 或 10600。要填新月份，先在上方“月份”里选那个月。':'登录管理员后可双击数值格填写。'}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
- +'<p class="hint">粘贴方法：在部门表格里选中新月份列的第一个数据格（第 2 行），直接粘贴。“Page优化”一行没有手工填写时，按当月优化记录自动汇总。2026 年 10 月起关键词排名分布统一用 Semrush，与之前的 Ahrefs 数据不可直接比较；Semrush 流量如为月末快照，以数据来源说明为准。</p>';}
+ +'<p class="hint">粘贴方法：在部门表格里选中新月份列的第一个数据格（第 2 行），直接粘贴。“Page优化”一行没有手工填写时，按当月优化记录自动汇总。各月关键词总数及排名分布均使用 Semrush；Semrush 流量如为月末快照，以数据来源说明为准。</p>';}
 
 // ---------------------------------------------------------------- admin import
 function adminPanel(){return panel('月度数据导入',`<p class="hint">导入由数据处理脚本（pipeline）生成的 import.json。相同站点、月份、页面会更新同一份快照，历史月份保留。处理步骤见仓库 docs/月度数据导入说明.md。</p><div class="actions"><label>选择 import.json<input id="import-file" type="file" accept=".json,application/json"></label></div><p id="import-preview" class="hint"></p><button id="import-confirm" class="primary" disabled>导入数据库</button>`);}
