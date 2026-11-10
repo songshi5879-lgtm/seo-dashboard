@@ -113,7 +113,7 @@ def month_bounds(month):
 
 
 def ga4_date_range(meta):
-    """Read '开始日期：20260801' / 'Start date: 20260801' from GA4 comment lines."""
+    """Read GA4 start/end comments or an Exploration-style YYYYMMDD-YYYYMMDD line."""
     s = e = None
     for line in meta:
         m = re.search(r"(开始日期|start date)\s*[:：]\s*(\d{8})", line, re.I)
@@ -121,6 +121,10 @@ def ga4_date_range(meta):
             s = datetime.strptime(m.group(2), "%Y%m%d").date()
         m = re.search(r"(结束日期|end date)\s*[:：]\s*(\d{8})", line, re.I)
         if m:
+            e = datetime.strptime(m.group(2), "%Y%m%d").date()
+        m = re.search(r"(?<!\d)(\d{8})\s*[-–—至]\s*(\d{8})(?!\d)", line)
+        if m:
+            s = datetime.strptime(m.group(1), "%Y%m%d").date()
             e = datetime.strptime(m.group(2), "%Y%m%d").date()
     return s, e
 
@@ -242,7 +246,8 @@ def read_gsc_zip(path, month, warnings):
     if "filters" in tables:
         h, rows = tables["filters"]
         for r in rows:
-            if len(r) > 1 and norm(r[0]) in (norm("search type"), norm("搜索类型")) and norm(r[1]) not in (norm("web"), norm("网页")):
+            if (len(r) > 1 and norm(r[0]) in (norm("search type"), norm("搜索类型"))
+                    and norm(r[1]) not in (norm("web"), norm("网页"), norm("网页（基于文本）"), norm("web (text results)"))):
                 warnings.append(f"{src}：搜索类型是“{r[1]}”，通常应为“网页”。")
     out = {"totals": totals}
     for k in ("queries", "pages", "countries", "devices"):
@@ -294,7 +299,8 @@ def read_query_page(path, month, warnings):
 # ---------------------------------------------------------------- GA4
 GA_DIMS = {
     "landing": ["着陆页 + 查询字符串", "着陆页", "landing page + query string", "landing page"],
-    "source_medium": ["会话来源/媒介", "session source / medium", "带来会话的来源/媒介", "来源/媒介", "source / medium"],
+    "source_medium": ["会话来源/媒介", "session source / medium", "带来会话的来源/媒介", "来源/媒介", "source / medium",
+                      "会话来源", "session source"],
     "channel": ["会话默认渠道组", "会话主要渠道组", "带来会话的主渠道组", "session default channel group",
                 "session primary channel group", "默认渠道组", "渠道组"],
 }
@@ -303,18 +309,24 @@ GA_METRICS = {
     "engagement_rate": ["互动率", "engagement rate", "感兴趣的会话占比"],
     "avg_engagement": ["每次会话的平均互动时长", "平均每次会话互动时长", "在线会话平均互动时长",
                        "average engagement time per session", "平均互动时长"],
-    "items_viewed": ["已查看的商品", "items viewed", "商品浏览", "查看的商品"],
-    "add_to_carts": ["加入购物车次数", "add to carts", "已加入购物车的商品", "items added to cart", "加购"],
+    "items_viewed": ["已查看的商品", "items viewed", "商品浏览", "查看的商品", "查看过的商品数"],
+    "add_to_carts": ["加入购物车次数", "add to carts", "已加入购物车的商品", "items added to cart", "加购",
+                     "添加到购物车的次数", "加入购物车的商品数"],
     "purchases": ["电子商务购买次数", "电子商务购买", "ecommerce purchases", "购买次数", "purchases", "交易次数", "transactions"],
     "revenue": ["购买收入", "purchase revenue", "总收入", "total revenue", "收入"],
 }
 
 
-def read_ga4(path, month, warnings, need_landing):
+def read_ga4(path, month, warnings, need_landing, allow_partial=False):
     src = f"GA4（{Path(path).name}）"
     header, rows, meta = read_rows(path)
     s, e = ga4_date_range(meta)
-    check_range(s, e, month, src, warnings, required=False)
+    ms, me = month_bounds(month)
+    if allow_partial and s and e and ms <= s <= e <= me:
+        if (s, e) != (ms, me):
+            warnings.append(f"{src}：按用户确认的可用范围 {s} 至 {e} 导入，不能视为整月。")
+    else:
+        check_range(s, e, month, src, warnings, required=False)
     cols = {}
     for k, al in GA_DIMS.items():
         cols[k] = find_col(header, al, required=(k == "landing" and need_landing), source=src)
@@ -331,10 +343,9 @@ def read_ga4(path, month, warnings, need_landing):
         if i is not None and "purchase" in norm(header[i]):
             cols["purchases"] = i
         elif i is not None:
-            raise InputError(f"{src}：只有“{header[i]}”。关键事件可能包含加购等，不能当订单用。请导出“电子商务购买次数”，"
-                             f"或在列名里注明 purchase，例如“关键事件数 (purchase)”。")
+            warnings.append(f"{src}：只有“{header[i]}”，未明确选择 purchase，购买次数保留为空。")
         else:
-            raise InputError(f"{src}：找不到购买次数列。")
+            warnings.append(f"{src}：找不到购买次数列，购买次数保留为空。")
     if cols["revenue"] is None:
         raise InputError(f"{src}：找不到收入列。")
     out = []
@@ -343,7 +354,8 @@ def read_ga4(path, month, warnings, need_landing):
             i = cols.get(k)
             return r[i] if i is not None and i < len(r) else None
         first = str(r[0]).strip().lower() if r else ""
-        if not r or first in ("总计", "total", "grand total", "合计"):
+        last = str(r[-1]).strip().lower() if r else ""
+        if not r or first in ("总计", "total", "grand total", "合计") or last in ("总计", "total", "grand total", "合计"):
             continue
         row = {k: (str(g(k)).strip() if g(k) is not None else None) for k in GA_DIMS}
         for k in GA_METRICS:

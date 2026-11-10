@@ -61,5 +61,5 @@ def write_monthly_column(month, monthly, path):
     ws2 = wb.create_sheet("说明")
     ws2.append(["粘贴方法：复制“月度数据表”D2:D133（共 132 行），粘贴到部门表格新月份列的第一个数据格。"])
     ws2.append(["行顺序与部门表一致：12 个站，每站 11 行。空格表示本月没有该数据，不代表 0。"])
-    ws2.append(["2026 年 10 月起关键词排名分布统一使用 Semrush，与此前 Ahrefs 数据不可直接比较。"])
+    ws2.append(["各月关键词总数及排名分布均使用 Semrush。"])
     wb.save(path)

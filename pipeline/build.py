@@ -59,32 +59,47 @@ def classify(source_medium, channel):
 def summarize_ga4(rows):
     """Aggregate GA4 rows into channel table + totals for natural traffic."""
     agg = {}
+    known = {k: bool(rows) and all(r.get(k) is not None for r in rows)
+             for k in ("sessions", "purchases", "revenue")}
     for r in rows:
         bucket, inc, note = classify(r.get("source_medium"), r.get("channel"))
         key = (bucket, r.get("source_medium") or "—")
         a = agg.setdefault(key, {"channel": bucket, "source_medium": key[1], "sessions": 0, "purchases": 0,
                                  "revenue": 0.0, "included": inc, "note": note})
         for k in ("sessions", "purchases", "revenue"):
+            if r.get(k) is None:
+                a["_missing_" + k] = True
             a[k] += r.get(k) or 0
     table = sorted(agg.values(), key=lambda x: (not x["included"], -x["sessions"]))
     inc = [x for x in table if x["included"]]
 
     def tot(rs):
         s = sum(x["sessions"] for x in rs)
-        p = sum(x["purchases"] for x in rs)
-        return {"sessions": s, "purchases": p, "revenue": round(sum(x["revenue"] for x in rs), 2),
-                "conversion": pct(p, s)}
-    google = [x for x in inc if x["source_medium"].lower() == "google / organic"]
+        complete = {k: (all(not x.get("_missing_" + k) for x in rs) if rs else known[k]) for k in known}
+        p = sum(x["purchases"] for x in rs) if complete["purchases"] else None
+        return {"sessions": s if complete["sessions"] else None, "purchases": p,
+                "revenue": round(sum(x["revenue"] for x in rs), 2) if complete["revenue"] else None,
+                "conversion": pct(p, s) if p is not None else None}
+    google = [x for x in inc if x["channel"].lower() == "organic search"
+              and x["source_medium"].lower() in ("google", "google / organic")]
     ai = [x for x in inc if x["channel"] == "AI Assistant"]
     by_channel = {}
     for x in inc:
         by_channel.setdefault(x["channel"], []).append(x)
-    return {
+    result = {
         "organic": tot(inc), "google_organic": tot(google), "ai": tot(ai),
         "by_channel": [{"channel": k, **tot(v)} for k, v in sorted(by_channel.items(), key=lambda kv: -tot(kv[1])["sessions"])],
         "channels": [{**x, "revenue": round(x["revenue"], 2)} for x in table if x["included"] or x["sessions"] >= 20
                      or x["channel"].startswith("Bing 广告")],
     }
+    for row in result["channels"]:
+        for k in ("purchases", "revenue"):
+            if row.get("_missing_" + k):
+                row[k] = None
+        for k in list(row):
+            if k.startswith("_missing_"):
+                del row[k]
+    return result
 
 
 # ------------------------------------------------------------------ helpers for opportunities
@@ -121,7 +136,7 @@ def opp(category, site_id, path, query=None, action="", evidence="", prio="中",
 
 
 # ------------------------------------------------------------------ main per-site build
-def build_site(site_id, month, folder, prev, warnings, extras):
+def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_landing=False):
     gsc = read_gsc_zip(first_file(folder, "gsc_performance*.zip", "*.zip"), month, warnings) \
         if first_file(folder, "gsc_performance*.zip", "*.zip") else None
     if gsc is None:
@@ -132,10 +147,22 @@ def build_site(site_id, month, folder, prev, warnings, extras):
     qp = read_query_page(qp_file, month, warnings)
     land_file = first_file(folder, "ga4_landing*.csv", "ga4_landing*.xlsx")
     acq_file = first_file(folder, "ga4_acquisition*.csv", "ga4_acquisition*.xlsx")
-    if land_file is None or acq_file is None:
-        raise InputError(f"{site_id}：缺少 GA4 着陆页（ga4_landing.csv）或流量获取报告（ga4_acquisition.csv）。")
-    landing, land_cols = read_ga4(land_file, month, warnings, need_landing=True)
-    acq, acq_cols = read_ga4(acq_file, month, warnings, need_landing=False)
+    ga4_missing = land_file is None and acq_file is None
+    if ga4_missing:
+        warnings.append(f"{site_id}：未提供 GA4 文件，按用户要求保留 GA4 指标为空。")
+        landing, land_cols, acq, acq_cols = [], {}, [], {}
+    else:
+        if land_file is None:
+            warnings.append(f"{site_id}：缺少 GA4 着陆页，页面级 GA4 指标为空。")
+            landing, land_cols = [], {}
+        else:
+            landing, land_cols = read_ga4(land_file, month, warnings, need_landing=True,
+                                         allow_partial=allow_partial_landing)
+        if acq_file is None:
+            warnings.append(f"{site_id}：缺少独立的 GA4 流量获取报告，改用着陆页明细汇总渠道数据。")
+            acq, acq_cols = landing, land_cols
+        else:
+            acq, acq_cols = read_ga4(acq_file, month, warnings, need_landing=False)
     unindexed = []
     for f in sorted(folder.glob("gsc_unindexed*")):
         unindexed += read_unindexed(f, warnings)
@@ -145,7 +172,7 @@ def build_site(site_id, month, folder, prev, warnings, extras):
     # ---- GA4 natural traffic
     ga = summarize_ga4(acq)
     ga_land = summarize_ga4(landing)
-    if ga["organic"]["sessions"] and ga_land["organic"]["sessions"]:
+    if not allow_partial_landing and ga["organic"]["sessions"] and ga_land["organic"]["sessions"]:
         diff = abs(ga_land["organic"]["sessions"] - ga["organic"]["sessions"]) / ga["organic"]["sessions"]
         if diff > 0.05:
             warnings.append(f"{site_id}：着陆页明细的自然会话（{ga_land['organic']['sessions']:.0f}）与流量获取报告"
@@ -155,13 +182,11 @@ def build_site(site_id, month, folder, prev, warnings, extras):
     gs = ga["google_organic"]["sessions"]
     if gclk and gs:
         ratio = gs / gclk
-        checks.append(f"GA4 google / organic 会话 ÷ GSC 点击 = {ratio:.2f}（正常约 1.4–1.6）")
-        if ratio < 1.0 or ratio > 2.2:
-            warnings.append(f"{site_id}：GA4 google / organic 会话是 GSC 点击的 {ratio:.2f} 倍，偏离正常范围，请检查渠道归类或跟踪。")
+        # Descriptive only: GA4 sessions and GSC clicks have no universal expected ratio.
     notset = sum(r["sessions"] or 0 for r in landing if (r.get("path") or "").startswith("(not set)")
                  and classify(r.get("source_medium"), r.get("channel"))[1])
     if ga_land["organic"]["sessions"] and notset / ga_land["organic"]["sessions"] > 0.05:
-        checks.append(f"自然流量着陆页为“(not set)”的会话占 {notset / ga_land['organic']['sessions']:.0%}，属于跟踪问题")
+        checks.append(f"自然流量着陆页为“(not set)”的会话占 {notset / ga_land['organic']['sessions']:.0%}，需核查会话开始事件及着陆页采集，不能仅凭该比例断定跟踪故障")
 
     # ---- pages (GSC page report first, query x page as fallback; GA4 natural landing rows)
     pages = {}
@@ -344,7 +369,7 @@ def build_site(site_id, month, folder, prev, warnings, extras):
           and not C.NOISE_PATH_RE.search(d["path"])]
     tot_s = sum(d["ga_sessions"] for d in lp)
     avg_eng = sum((d["ga_avg_engagement"] or 0) * d["ga_sessions"] for d in lp) / tot_s if tot_s else None
-    site_conv = ga["organic"]["conversion"]
+    site_conv = (ga_land if allow_partial_landing else ga)["organic"]["conversion"]
     for d in lp:
         s = d["ga_sessions"]
         if s >= C.LOW_ENGAGEMENT_MIN_SESSIONS and avg_eng and (
@@ -498,7 +523,7 @@ def build_site(site_id, month, folder, prev, warnings, extras):
                           f"{mob['position'] or 0:.1f} vs {desk['position'] or 0:.1f}")
     countries = sorted(gsc.get("countries", []), key=lambda c: -c["clicks"])[:15]
     overview = {
-        "gsc": gsc["totals"], "ga4": {**ga, "currency": "USD"},
+        "gsc": gsc["totals"], "ga4": None if ga4_missing else {**ga, "currency": "USD"},
         "devices": devices,
         "countries": [{"country": c["key"], "clicks": c["clicks"], "impressions": c["impressions"],
                        "ctr": pct(c["clicks"], c["impressions"]), "position": c["position"]} for c in countries],

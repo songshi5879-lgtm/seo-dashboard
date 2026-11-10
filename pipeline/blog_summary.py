@@ -64,6 +64,7 @@ ACQ = {"users": ["活跃用户", "active users"], "sessions": ["会话数", "ses
        "engaged": ["感兴趣的会话数", "互动会话数", "engaged sessions"],
        "eng_per_session": ["每次会话的平均互动时长", "在线会话平均互动时长", "average engagement time per session"],
        "events": ["事件数", "event count"], "bounce": ["跳出率", "bounce rate"]}
+ACQ["key_event_rate"] = ["会话关键事件率", "session key event rate"]
 
 
 def read_acq(path):
@@ -76,7 +77,7 @@ def read_acq(path):
             excl = tuple(i for i, h in enumerate(header) if "每次" in str(h) or "会话事件" in str(h) or "per session" in str(h).lower())
         idx[k] = find_col(header, al, required=k == "sessions", exclude=excl, source=src)
     s = {k: 0.0 for k in ("users", "sessions", "key_events", "revenue", "engaged", "events")}
-    ew = 0.0
+    ew = rate_weight = 0.0
     has = {k: idx[k] is not None for k in idx}
     for r in rows:
         first = str(r[0] if r else "").strip().lower()
@@ -88,6 +89,8 @@ def read_acq(path):
                 s[k] += num(r[idx[k]]) or 0
         if idx["eng_per_session"] is not None:
             ew += (num(r[idx["eng_per_session"]]) or 0) * sess
+        if idx["key_event_rate"] is not None:
+            rate_weight += (num(r[idx["key_event_rate"]]) or 0) * sess
     out = {k: (round(v, 2) if k == "revenue" else int(round(v))) for k, v in s.items() if has[k]}
     S = s["sessions"]
     if S:
@@ -98,8 +101,8 @@ def read_acq(path):
         if has["engaged"]:
             out["engaged_rate"] = round(s["engaged"] / S, 4)
             out["bounce"] = round(1 - s["engaged"] / S, 4)
-        if has["key_events"]:
-            out["key_event_rate"] = round(s["key_events"] / S, 4)
+        if has["key_event_rate"]:
+            out["key_event_rate"] = round(rate_weight / S, 4)
     return out, ga4_date_range(meta)
 
 
