@@ -105,16 +105,23 @@ const PARSE={
  date:v=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(v))throw Error('日期格式为 YYYY-MM-DD');return v;},
  text:v=>v,long:v=>v,
  url:(v,ds)=>{const s=state.sites.find(x=>x.id===ds.site)||site();const u=new URL(v.startsWith('/')?'https://'+s.domain+v:v);if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,''))throw Error(`网址必须是 https://${s.domain} 下的页面`);return u.href;}};
+let editing=null;
 function startEdit(td,ev){
- if(ev&&ev.target.closest('a')&&td.dataset.trigger==='click')return;
+ if(ev&&(ev.target.closest('button,.cell-editor')||(td.dataset.trigger==='click'&&ev.target.closest('a'))))return;
  if(!state.admin){message('登录管理员后可以编辑单元格。');return;}
- if(td.querySelector('.cell-input'))return;
+ if(editing){if(editing!==td){message('还有一个格子在编辑中，请先点“更新”或“取消”。',true);editing.querySelector('.cell-input')?.focus();}return;}
  const type=td.dataset.type,cur=td.dataset.raw??'',long=type==='long';
+ const box=document.createElement('div');box.className='cell-editor';
  const el=document.createElement(long?'textarea':'input');el.className='cell-input';if(type==='date')el.type='date';el.value=cur;
- td.classList.add('editing');td.innerHTML='';td.appendChild(el);el.focus();if(type!=='date'&&el.select)el.select();
- let done=false;const finish=async save=>{if(done)return;done=true;const v=el.value.trim();if(!save||v===cur.trim()){render();return;}td.classList.add('saving');try{await saveCell(td.dataset,v);}catch(e){message(e.message,true);}render();};
- el.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();finish(false);}else if(e.key==='Enter'&&(!long||e.ctrlKey||e.metaKey)){e.preventDefault();finish(true);}};
- el.onblur=()=>finish(true);}
+ const ok=document.createElement('button');ok.type='button';ok.className='primary small';ok.textContent='更新';
+ const no=document.createElement('button');no.type='button';no.className='small';no.textContent='取消';
+ const bar=document.createElement('div');bar.className='cell-actions';bar.append(ok,no);box.append(el,bar);
+ editing=td;td.classList.add('editing');td.innerHTML='';td.appendChild(box);el.focus();if(type!=='date'&&el.select)el.select();
+ const close=()=>{editing=null;render();};
+ no.onclick=close;
+ ok.onclick=async()=>{const v=el.value.trim();if(v===cur.trim()){close();return;}ok.disabled=no.disabled=true;ok.textContent='保存中…';
+  try{await saveCell(td.dataset,v);close();}catch(e){message(e.message,true);ok.disabled=no.disabled=false;ok.textContent='更新';el.focus();}};
+ el.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();close();}};}
 async function saveCell(ds,raw){
  const parse=PARSE[ds.type]||PARSE.text;
  if(ds.ed==='content'||ds.ed==='keyword'){
@@ -229,11 +236,11 @@ function blogSheet(m){
   const last=rows.length,t=last+1,T=pick('__total','users',p.blog_users);
   add([,,,,,,,C('总计','label'),C(sumV,'int',{f:`=SUM(I${first}:I${last})`}),C(T.v,'int',{...OV('__total','users','int',T),title:'博客页面去重活跃用户（GA4 网页和屏幕报告筛选 /blogs/ 后的总计），导出文件里没有，需要手动填写'}),
    C(T.v?sumV/T.v:null,'num2',{f:`=IFERROR(I${t}/J${t},"")`}),C(T.v?sumLU/T.v:null,'dur',{f:`=IFERROR(SUMPRODUCT(L${first}:L${last},J${first}:J${last})/J${t},"")`}),C('页面用户累加(人次)','label'),C(sumU,'int',{f:`=SUM(J${first}:J${last})`})],'total');
-  const s=p.site||{},BV=pick('__site','views',s.views),BU=pick('__site','users',s.users),BK=pick('__site','vpu',s.vpu??(s.views&&s.users?Math.round(s.views/s.users*100)/100:null)),BL=pick('__site','eng',s.eng),bl=t+1;
-  add([,,,,,,,C('全站基准(GA4填)','label'),C(BV.v,'int',OV('__site','views','int',BV)),C(BU.v,'int',OV('__site','users','int',BU)),C(BK.v,'num2',OV('__site','vpu','num',BK)),C(BL.v,'dur',OV('__site','eng','dur',BL))],'base');
-  const kT=T.v?sumV/T.v:null,lT=T.v?sumLU/T.v:null,r=(a,b2)=>a!=null&&b2?a/b2:null;
+  const s=p.site||{},BV=pick('__site','views',s.views),BU=pick('__site','users',s.users),BK=pick('__site','vpu',null),BL=pick('__site','eng',s.eng),bl=t+1;
+  add([,,,,,,,C('全站基准(GA4填)','label'),C(BV.v,'int',OV('__site','views','int',BV)),C(BU.v,'int',OV('__site','users','int',BU)),(BK.ov?C(BK.v,'num2',OV('__site','vpu','num',BK)):C(BV.v!=null&&BU.v?BV.v/BU.v:null,'num2',{f:`=IFERROR(I${bl}/J${bl},"")`})),C(BL.v,'dur',OV('__site','eng','dur',BL))],'base');
+  const kT=T.v?sumV/T.v:null,lT=T.v?sumLU/T.v:null,r=(a,b2)=>a!=null&&b2?a/b2:null,kB=BK.ov?BK.v:(BV.v!=null&&BU.v?BV.v/BU.v:null);
   add([,,,,,,,C('占比 / 对比','label'),C(r(sumV,BV.v),'share',{f:`=IF(I${bl}="","",I${t}/I${bl})`}),C(r(T.v,BU.v),'share',{f:`=IF(J${bl}="","",J${t}/J${bl})`}),
-   C(r(kT,BK.v)!=null?r(kT,BK.v)-1:null,'diff',{f:`=IF(K${bl}="","",K${t}/K${bl}-1)`}),C(r(lT,BL.v)!=null?r(lT,BL.v)-1:null,'diff',{f:`=IF(L${bl}="","",L${t}/L${bl}-1)`})],'ratio');
+   C(r(kT,kB)!=null?r(kT,kB)-1:null,'diff',{f:`=IF(K${bl}="","",K${t}/K${bl}-1)`}),C(r(lT,BL.v)!=null?r(lT,BL.v)-1:null,'diff',{f:`=IF(L${bl}="","",L${t}/L${bl}-1)`})],'ratio');
   blocks.push({title:`${b.brand} 博客（${st.domain}）`,from:start,to:rows.length,snap,missing,articles:list.length});add([],'gap');}
  for(const b of BLOG_BLOCKS.filter(x=>x.layout)){
   const snap=snapshot('blog_summary',b.sid,m),acq=snap?.payload?.acq||{},O=ovMap('blog_summary',b.sid,m),start=rows.length,A=b.layout==='A';
@@ -248,7 +255,7 @@ function blogSheet(m){
    const F={events_per_session:v.events!=null&&S&&!ovs.events_per_session?`=IFERROR(J${n}/C${n},"")`:null,engaged_rate:v.engaged!=null&&S&&!ovs.engaged_rate?`=IFERROR(F${n}/C${n},"")`:null,
     key_event_rate:v.key_events!=null&&S&&!ovs.key_event_rate?`=IFERROR(D${n}/C${n},"")`:null,bounce:v.engaged_rate!=null&&!ovs.bounce?`=IFERROR(1-I${n},"")`:null};
    const cells=IDX_KEYS.map((k,i)=>{if(!k)return C(rk==='__acq_blog'?b.brand:null);if(!A&&k==='users')return C(label,'label');
-    const t=IDX_TYPES[i],type=t==='money'||t==='num2'?'num':t;return C(v[k],t,{f:F[k]||undefined,ed:edAttr('ov',{col:k,type,row:rk,site:b.sid,grid:'blog_summary'}),raw:v[k]==null?'':t==='dur'?durCopy(v[k]):t==='pct'?fmt(v[k]*100,2)+'%':String(v[k]),ov:ovs[k]});});
+    const t=IDX_TYPES[i],type=t==='money'||t==='num2'?'num':t;if(F[k])return C(v[k],t,{f:F[k]});return C(v[k],t,{ed:edAttr('ov',{col:k,type,row:rk,site:b.sid,grid:'blog_summary'}),raw:v[k]==null?'':t==='dur'?durCopy(v[k]):t==='pct'?fmt(v[k]*100,2)+'%':String(v[k]),ov:ovs[k]});});
    if(A)cells[12]=C(label,'label');lines.push({n,v});add(cells,rk==='__acq_blog'?'':'base');}
   const [bn,sn]=lines,rc=[];
   IDX_KEYS.forEach((k,i)=>{if(!k){rc.push(C(null));return;}const col='ABCDEFGHIJKL'[i];if(!A&&k==='users'){rc.push(C('占比 / 对比','label'));return;}
@@ -264,16 +271,20 @@ function sheetDisplay(c){const v=c.v;if(v==null||v==='')return '';
 function sheetCopy(c,formulas){if(formulas&&c.f)return c.f;const v=c.v;if(v==null||v==='')return '';
  switch(c.t){case 'int':return String(Math.round(v));case 'num2':return String(Math.round(v*100)/100);case 'money':return String(Math.round(v*100)/100);case 'dur':return durCopy(v);
   case 'pct':case 'share':case 'diff':return String(Math.round(v*10000)/10000);case 'date':{const [y,mo,d]=v.split('-');return `${y}/${+mo}/${+d}`;}default:return String(v).replace(/[\t\r\n]+/g,' ');}}
-function sheetTSV(rows,formulas=false){return rows.map(r=>r.cls==='gap'?'':r.map(c=>sheetCopy(c,formulas)).join('\t').replace(/\t+$/,'')).join('\n');}
+const shiftRefs=(f,off)=>off?f.replace(/(^|[^A-Z$])([A-N])(\d+)(?![\d(])/g,(m,a,col,n)=>a+col+(+n+off)):f;
+function sheetTSV(rows,formulas=false,off=0){return rows.map(r=>r.cls==='gap'?'':r.map(c=>{const v=sheetCopy(c,formulas);return formulas&&c.f?shiftRefs(v,off):v;}).join('\t').replace(/\t+$/,'')).join('\n');}
+function blogCopy(from,to,title){const withF=$('blog-copy-mode')?.value!=='values',start=Math.max(1,parseInt($('blog-copy-row')?.value,10)||1),rows=state.blogSheet.rows.slice(from,to);
+ copyText(sheetTSV(rows,withF,start-(from+1)),`已复制${title}（${withF?`含公式，请粘贴到第 ${start} 行的 A 列`:'数值'}）。`);}
 function blogSummary(){
  const m=month(),{rows,blocks}=blogSheet(m);state.blogSheet={rows,blocks};
  const render1=(r)=>`<tr class="${r.cls}">`+r.map((c,i)=>{const k=[c.t==='head'?'':isNumT(c.t)?'num':'',c.ed&&state.admin?'editable':'',c.ov?'ov':'',c.f&&!c.ed?'calc':''].filter(Boolean).join(' ');
-  const tag=c.t==='head'?'th':'td';return `<${tag} class="${k}"${c.ed?c.ed+` data-raw="${esc(c.raw??'')}"`:''}${c.title||c.ov?` title="${esc(c.title||'手动填写的值；清空后恢复为导入的数据')}"`:''}>${sheetDisplay(c)}</${tag}>`;}).join('')+'</tr>';
+  const tag=c.t==='head'?'th':'td';return `<${tag} class="${k}"${c.ed?c.ed+` data-raw="${esc(c.raw??'')}"`:''}${c.title||c.ov||c.f?` title="${esc(c.title||(c.ov?'手动填写的值；清空后恢复为导入的数据':'公式（自动计算）：'+c.f))}"`:''}>${sheetDisplay(c)}</${tag}>`;}).join('')+'</tr>';
  const letters='<tr class="letters">'+'ABCDEFGHIJKLMN'.split('').map(x=>`<td>${x}</td>`).join('')+'</tr>';
- let html=panel('博客数据总结表',`<div class="topline"><p class="hint">格式与部门会议表一致（A–N 列，O 列以后不包含）。${state.admin?'双击白色格子可以编辑：文章信息改的是内容追踪表；浏览、用户、时长、收录、基准、指数改的是本月的手动值（浅黄色），清空即恢复为导入的数据，填“-”表示留空。':'登录管理员后可双击编辑。'}</p><div class="actions"><button id="copy-blog" class="primary">复制整表（数值）</button><button id="copy-blog-f">复制整表（含公式）</button></div></div>`
-  +'<p class="hint">“含公式”版本按粘贴到空白表格的 A1 计算行号；粘贴到会议表已有的位置时用“数值”版本，或用每块右上角的按钮只复制一块。灰色斜体的格子是公式算出来的。</p>');
+ let html=panel('博客数据总结表',`<div class="topline"><p class="hint">格式与部门会议表一致（A–N 列，O 列以后不包含）。${state.admin?'双击白色格子可以编辑：文章信息改的是内容追踪表；浏览、用户、时长、收录、基准、指数改的是本月的手动值（浅黄色），清空即恢复为导入的数据，填“-”表示留空。':'登录管理员后可双击编辑。'}</p></div>`
+  +`<div class="copy-bar"><label>复制方式<select id="blog-copy-mode"><option value="formulas">含公式（和模板一样会自动计算）</option><option value="values">仅数值</option></select></label><label>粘贴到第几行（A 列）<input id="blog-copy-row" type="number" min="1" value="${esc(state.blogCopyRow||1)}"></label><button id="copy-blog" class="primary">复制整表</button></div>`
+  +'<p class="hint">灰色斜体的格子是公式：出词量、每位活跃用户浏览量、总计、全站基准的人均浏览量、占比/对比，以及指数里的比率，填好或更新数据后会自动重算，鼠标停在格子上能看到公式。含公式复制时，公式里的行号按“粘贴到第几行”计算：整表复制填整表要贴到的起始行，单块复制填这一块表头要贴到的行。</p>');
  blocks.forEach((b,i)=>{const s=b.snap;const meta=b.index?'':`${b.articles} 篇文章${b.missing?`，其中 ${b.missing} 篇缺浏览数据`:''}`;
-  html+=panel(esc(b.title),`<div class="topline"><p class="hint">${meta}${s?'':'本月还没有导入这部分数据。'}${s?.payload?.date_range?' 数据范围：'+esc(s.payload.date_range):''}</p><button data-copy-block="${i}">复制本块（数值）</button></div><div class="table-wrap"><table class="sheet">${letters}${rows.slice(b.from,b.to).map(render1).join('')}</table></div>`);});
+  html+=panel(esc(b.title),`<div class="topline"><p class="hint">${meta}${s?'':'本月还没有导入这部分数据。'}${s?.payload?.date_range?' 数据范围：'+esc(s.payload.date_range):''}</p><button data-copy-block="${i}">复制本块</button></div><div class="table-wrap"><table class="sheet">${letters}${rows.slice(b.from,b.to).map(render1).join('')}</table></div>`);});
  return html+'<p class="hint">文章行来自内容追踪表：该站 /blogs/ 下、发布日期在本月月底以前的文章（没有发布日期但本月有浏览数据的也会列出）。浏览次数、活跃用户、每位活跃用户平均互动时长来自 GA4“网页和屏幕”报告；是否收录按 GSC 未编入索引导出和当月曝光判断；指数来自 GA4“流量获取”报告（博客行为着陆页包含 /blogs/ 的会话）。GA4 导出不带总计行，博客去重活跃用户、全站活跃用户和全站平均互动时长需要手动填写。</p>';}
 const isNumT=t=>['int','num2','money','dur','pct','share','diff'].includes(t);
 
@@ -324,6 +335,7 @@ function adminPanel(){return panel('月度数据导入',`<p class="hint">导入�
 
 // ---------------------------------------------------------------- render
 function render(){
+ editing=null;
  const scroll=[...document.querySelectorAll('#content .table-wrap')].map(w=>w.scrollLeft);
  $('page-title').textContent=pages[state.page];$('site-domain').textContent=state.page==='monthly'?'全部 12 个站点':state.page==='blog'?'Autel · Launch · Otofix 博客':site()?.domain||'';
  $('nav').innerHTML=Object.entries(pages).map(([k,v])=>`<button data-page="${k}" class="${k===state.page?'active':''}">${v}</button>`).join('');
@@ -339,9 +351,9 @@ function render(){
  document.querySelectorAll('[data-del-content]').forEach(b=>b.onclick=()=>deleteRow('seo_content',b.dataset.delContent));
  if($('kw-add'))$('kw-add').onsubmit=addKeyword;
  if($('content-add'))$('content-add').onsubmit=addContent;
- if($('copy-blog'))$('copy-blog').onclick=()=>copyText(sheetTSV(state.blogSheet.rows),'已复制整表（数值），可直接粘贴到会议表。');
- if($('copy-blog-f'))$('copy-blog-f').onclick=()=>copyText(sheetTSV(state.blogSheet.rows,true),'已复制整表（含公式），请粘贴到空白表格的 A1。');
- document.querySelectorAll('[data-copy-block]').forEach(b=>b.onclick=()=>{const k=state.blogSheet.blocks[+b.dataset.copyBlock];copyText(sheetTSV(state.blogSheet.rows.slice(k.from,k.to)),'已复制“'+k.title+'”。');});
+ if($('blog-copy-mode')){$('blog-copy-mode').value=state.blogCopyMode||'formulas';$('blog-copy-mode').onchange=e=>state.blogCopyMode=e.target.value;$('blog-copy-row').oninput=e=>state.blogCopyRow=e.target.value;}
+ if($('copy-blog'))$('copy-blog').onclick=()=>blogCopy(0,state.blogSheet.rows.length,'整表');
+ document.querySelectorAll('[data-copy-block]').forEach(b=>b.onclick=()=>{const k=state.blogSheet.blocks[+b.dataset.copyBlock];blogCopy(k.from,k.to,'“'+k.title+'”');});
  document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{state.page=b.dataset.page;state.editing=null;render();});
  document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{state.oppCat=b.dataset.cat;render();});
  document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.editing=b.dataset.edit;render();window.scrollTo({top:0,behavior:'smooth'});});
