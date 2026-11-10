@@ -331,10 +331,12 @@ const isNumT=t=>['int','num2','money','dur','pct','share','diff'].includes(t);
 function pageRow(m,url){const s=snapshot('pages',$('site').value,m);if(!s)return undefined;const k=keyPath(url);return (s.payload.rows||[]).find(r=>keyPath(r.path)===k)||null;}
 function cmpCell(before,after,mb,ma){
  if(before===undefined&&after===undefined)return '<span class="muted">缺少前后月份数据</span>';
+ const partial=m=>{const r=snapshot('pages',$('site').value,m)?.provenance?.ga4_landing_date_range;return r&&r!==`${m} 至 ${m.slice(0,8)+String(daysIn(m)).padStart(2,'0')}`;};
+ const partialGA=partial(mb)||partial(ma);
  const line=(label,k,type)=>{const b=before?.[k],a=after?.[k];const c=k==='gsc_position'?(b!=null&&a!=null?b-a:null):change(a,b);
-  const cs=c==null?'—':k==='gsc_position'?`<span class="${c>0?'positive':c<0?'negative':''}">${c>0?'+':''}${fmt(c,1)}</span>`:changeHtml(c);
+  const cs=c==null||partialGA&&k.startsWith('ga_')?'—':k==='gsc_position'?`<span class="${c>0?'positive':c<0?'negative':''}">${c>0?'+':''}${fmt(c,1)}</span>`:changeHtml(c);
   return `${label} ${type==='pos'?fmt(b,1):fmt(b)} → ${after===undefined?'待下月':type==='pos'?fmt(a,1):fmt(a)} ${after===undefined?'':cs}`;};
- return `<div class="cmp">${esc(mb.slice(0,7))} → ${esc(ma.slice(0,7))}<br>${line('点击','gsc_clicks')}<br>${line('曝光','gsc_impressions')}<br>${line('排名','gsc_position','pos')}<br>${line('自然会话','ga_sessions')}<br>${line('订单','ga_purchases')}</div>`;}
+ return `<div class="cmp">${esc(mb.slice(0,7))} → ${esc(ma.slice(0,7))}<br>${line('点击','gsc_clicks')}<br>${line('曝光','gsc_impressions')}<br>${line('排名','gsc_position','pos')}<br>${line('自然会话','ga_sessions')}<br>${line('订单','ga_purchases')}${partialGA?'<br><span class="muted">9月页面GA4仅9月9–30日，会话/订单不计算整月变化率。</span>':''}</div>`;}
 function optimizations(){
  let html='';const e=state.editing?state.records.find(r=>r.id===state.editing):null;
  if(state.admin)html+=panel(e?'修改优化记录':'新增优化记录',`<form id="record-form" class="record-form"><label>页面网址<input name="page_url" type="url" placeholder="https://${esc(site()?.domain)}/…" required value="${esc(e?.page_url||'')}"></label><label>优化日期<input name="optimized_on" type="date" required value="${esc(e?.optimized_on||new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()))}"></label><label>优化类型<select name="category">${['Title/Meta','内容','内链','技术','其他'].map(x=>`<option ${e?.category===x?'selected':''}>${x}</option>`).join('')}</select></label><label class="inline"><input name="published" type="checkbox" ${!e||e.published?'checked':''}>公开显示此记录</label><label class="wide">优化内容<textarea name="description" maxlength="5000" required>${esc(e?.description||'')}</textarea></label><div class="wide actions"><button class="primary" type="submit">${e?'保存修改':'保存到数据库'}</button>${e?'<button type="button" id="cancel-edit">取消修改</button>':''}</div></form>`);
@@ -393,7 +395,8 @@ function render(){
  if(state.loading){$('content').innerHTML=empty('正在读取数据','请稍候');return;}
  if(state.error){$('content').innerHTML=empty('数据暂时无法读取',state.error);return;}
  const renderers={overview,opportunities,keywords,content,optimizations,monthly,blog:blogSummary};
- $('content').innerHTML=(state.admin&&EDIT_PAGES.includes(state.page)?editBar():'')+viewWithPending(()=>renderers[state.page]())+(state.admin&&state.page==='monthly'?adminPanel():'');
+ const gaRange=['content','opportunities'].includes(state.page)?snapshot('pages')?.provenance?.ga4_landing_date_range:null;
+ $('content').innerHTML=(state.admin&&EDIT_PAGES.includes(state.page)?editBar():'')+(gaRange?`<p class="note">页面级 GA4 数据范围：${esc(gaRange)}。GSC 为整月；页面会话、商品浏览、加购、订单、收入和互动指标不代表整月。</p>`:'')+viewWithPending(()=>renderers[state.page]())+(state.admin&&state.page==='monthly'?adminPanel():'');
  document.querySelectorAll('[data-ed]').forEach(td=>{const k=pendKey(td.dataset);td.dataset.k=k;if(pending.has(k)){td.classList.add('pending');td.title='已修改，点上方“更新”后保存';}});
  if($('pending-save')){$('pending-save').onclick=savePending;$('pending-cancel').onclick=cancelPending;}
  document.querySelectorAll('#content .table-wrap').forEach((w,i)=>{if(scroll[i])w.scrollLeft=scroll[i];});
