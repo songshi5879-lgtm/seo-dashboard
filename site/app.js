@@ -106,40 +106,78 @@ const PARSE={
  date:v=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(v))throw Error('日期格式为 YYYY-MM-DD');return v;},
  text:v=>v,long:v=>v,
  url:(v,ds)=>{const s=state.sites.find(x=>x.id===ds.site)||site();const u=new URL(v.startsWith('/')?'https://'+s.domain+v:v);if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,''))throw Error(`网址必须是 https://${s.domain} 下的页面`);return u.href;}};
-let editing=null;
+// Edits are staged in the browser and written to the database only when 更新 is pressed.
+let editing=null;const pending=new Map();
+const EDIT_PAGES=['keywords','content','monthly','blog'];
+const pendKey=ds=>ds.ed==='ov'?['ov',ds.grid,ds.site,ds.month||month(),ds.row,ds.col].join('|'):[ds.ed,ds.id,ds.col].join('|');
+function stageValue(ds,raw){
+ const parse=PARSE[ds.type]||PARSE.text;let val;
+ if(ds.ed==='ov'){val=raw===''?null:raw==='-'||raw==='—'?'':String(parse(raw,ds));}
+ else{val=raw===''?null:parse(raw,ds);if(val==null&&(ds.col==='url'||ds.col==='keyword'))throw Error(ds.col==='url'?'网址不能为空':'关键词不能为空');}
+ return val;}
+function stage(td,raw){
+ const ds={...td.dataset},k=pendKey(ds),prev=pending.get(k),orig=prev?prev.orig:(td.dataset.raw??'');
+ if(raw.trim()===orig.trim()){pending.delete(k);return;}
+ const val=stageValue(ds,raw.trim());
+ pending.set(k,{ds,raw:raw.trim(),val,orig,page:state.page,month:ds.month||month()});}
 function startEdit(td,ev){
- if(ev&&(ev.target.closest('button,.cell-editor')||(td.dataset.trigger==='click'&&ev.target.closest('a'))))return;
+ if(ev&&(ev.target.closest('.cell-input')||(td.dataset.trigger==='click'&&ev.target.closest('a'))))return;
  if(!state.admin){message('登录管理员后可以编辑单元格。');return;}
- if(editing){if(editing!==td){message('还有一个格子在编辑中，请先点“更新”或“取消”。',true);editing.querySelector('.cell-input')?.focus();}return;}
+ if(editing)return;
  const type=td.dataset.type,cur=td.dataset.raw??'',long=type==='long';
- const box=document.createElement('div');box.className='cell-editor';
  const el=document.createElement(long?'textarea':'input');el.className='cell-input';if(type==='date')el.type='date';el.value=cur;
- const ok=document.createElement('button');ok.type='button';ok.className='primary small';ok.textContent='更新';
- const no=document.createElement('button');no.type='button';no.className='small';no.textContent='取消';
- const bar=document.createElement('div');bar.className='cell-actions';bar.append(ok,no);box.append(el,bar);
- editing=td;td.classList.add('editing');td.innerHTML='';td.appendChild(box);el.focus();if(type!=='date'&&el.select)el.select();
- const close=()=>{editing=null;render();};
- no.onclick=close;
- ok.onclick=async()=>{const v=el.value.trim();if(v===cur.trim()){close();return;}ok.disabled=no.disabled=true;ok.textContent='保存中…';
-  try{await saveCell(td.dataset,v);close();}catch(e){message(e.message,true);ok.disabled=no.disabled=false;ok.textContent='更新';el.focus();}};
- el.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();close();}};}
-async function saveCell(ds,raw){
- const parse=PARSE[ds.type]||PARSE.text;
- if(ds.ed==='content'||ds.ed==='keyword'){
-  const val=raw===''?null:parse(raw,ds);
-  if(val==null&&(ds.col==='url'||ds.col==='keyword'))throw Error(ds.col==='url'?'网址不能为空':'关键词不能为空');
-  const table=ds.ed==='content'?'seo_content':'seo_keywords',list=ds.ed==='content'?state.content:state.keywords;
-  const [row]=await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(ds.id)}`,{method:'PATCH',auth:true,body:{[ds.col]:val},prefer:'return=representation'});
-  const i=list.findIndex(x=>String(x.id)===ds.id);if(row&&i>=0)list[i]=row;
- }else{
-  const key={grid:ds.grid,site_id:ds.site,month:ds.month||month(),row_key:ds.row,col:ds.col};
-  const same=o=>o.grid===key.grid&&o.site_id===key.site_id&&o.month===key.month&&o.row_key===key.row_key&&o.col===key.col;
-  if(raw===''){await request('/rest/v1/seo_cell_overrides?'+Object.entries(key).map(([k,v])=>`${k}=eq.${encodeURIComponent(v)}`).join('&'),{method:'DELETE',auth:true});state.overrides=state.overrides.filter(o=>!same(o));message('已清除手动值，恢复为导入的数据。');return;}
-  const value=raw==='-'||raw==='—'?'':String(parse(raw,ds));
-  const [row]=await request('/rest/v1/seo_cell_overrides?on_conflict=grid,site_id,month,row_key,col',{method:'POST',auth:true,body:{...key,value},prefer:'resolution=merge-duplicates,return=representation'});
-  state.overrides=state.overrides.filter(o=>!same(o));if(row)state.overrides.push(row);
- }
- message('已保存。');}
+ td.classList.add('editing');td.innerHTML='';td.appendChild(el);
+ let done=false;
+ const finish=(keep,fromBlur)=>{if(done)return;
+  if(keep){try{if(el.value.trim()!==cur.trim())stage(td,el.value);}catch(e){message(e.message,true);if(!fromBlur){el.focus();return;}}}
+  done=true;editing=null;render();};
+ editing={td,finish};if($('pending-save')){$('pending-save').disabled=$('pending-cancel').disabled=false;}el.focus();if(type!=='date'&&el.select)el.select();
+ el.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();finish(false);}else if(e.key==='Enter'&&(!long||e.ctrlKey||e.metaKey)){e.preventDefault();finish(true);}};
+ el.onblur=()=>finish(true,true);}
+// While a cell is open, pressing another cell or a page button first keeps the typed value,
+// then continues with what was pressed (the page is redrawn in between).
+document.addEventListener('mousedown',e=>{
+ if(!editing||editing.td.contains(e.target))return;
+ const cell=e.target.closest('[data-ed]'),btn=e.target.closest('button[id]');
+ if(!cell&&!btn)return;
+ e.preventDefault();const k=cell?.dataset.k,id=btn?.id;editing.finish(true,true);
+ if(k){const n=document.querySelector(`[data-k="${CSS.escape(k)}"]`);if(n)startEdit(n);}else if(id)$(id)?.click();},true);
+function pagePending(){return [...pending.entries()].filter(([,v])=>v.page===state.page);}
+function viewWithPending(fn){
+ if(!pending.size)return fn();
+ const base={content:state.content,keywords:state.keywords,overrides:state.overrides};
+ const patch=(list,ed)=>list.map(r=>{let x=r;pending.forEach(v=>{if(v.ds.ed===ed&&String(r.id)===v.ds.id){x=x===r?{...r}:x;x[v.ds.col]=v.val;}});return x;});
+ let ov=state.overrides;
+ pending.forEach(v=>{if(v.ds.ed!=='ov')return;const d=v.ds,m=v.month;ov=ov.filter(o=>!(o.grid===d.grid&&o.site_id===d.site&&o.month===m&&o.row_key===d.row&&o.col===d.col));
+  if(v.val!==null)ov=[...ov,{grid:d.grid,site_id:d.site,month:m,row_key:d.row,col:d.col,value:v.val}];});
+ Object.assign(state,{content:patch(base.content,'content'),keywords:patch(base.keywords,'keyword'),overrides:ov});
+ try{return fn();}finally{Object.assign(state,base);}}
+async function savePending(){
+ const items=pagePending();if(!items.length)return;
+ $('pending-save').disabled=$('pending-cancel').disabled=true;$('pending-save').textContent='保存中…';
+ const doneKeys=[];
+ try{
+  for(const [ed,table,list] of [['content','seo_content',state.content],['keyword','seo_keywords',state.keywords]]){
+   const byId={};items.filter(([,v])=>v.ds.ed===ed).forEach(([k,v])=>{(byId[v.ds.id]??={body:{},keys:[]}).body[v.ds.col]=v.val;byId[v.ds.id].keys.push(k);});
+   for(const [id,g] of Object.entries(byId)){
+    const [row]=await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,{method:'PATCH',auth:true,body:g.body,prefer:'return=representation'});
+    const i=list.findIndex(x=>String(x.id)===id);if(row&&i>=0)list[i]=row;doneKeys.push(...g.keys);}}
+  const ov=items.filter(([,v])=>v.ds.ed==='ov'),same=(o,v)=>o.grid===v.ds.grid&&o.site_id===v.ds.site&&o.month===v.month&&o.row_key===v.ds.row&&o.col===v.ds.col;
+  const ups=ov.filter(([,v])=>v.val!==null);
+  if(ups.length){const rows=await request('/rest/v1/seo_cell_overrides?on_conflict=grid,site_id,month,row_key,col',{method:'POST',auth:true,
+    body:ups.map(([,v])=>({grid:v.ds.grid,site_id:v.ds.site,month:v.month,row_key:v.ds.row,col:v.ds.col,value:v.val})),prefer:'resolution=merge-duplicates,return=representation'});
+   state.overrides=state.overrides.filter(o=>!ups.some(([,v])=>same(o,v))).concat(rows||[]);doneKeys.push(...ups.map(([k])=>k));}
+  const dels=ov.filter(([,v])=>v.val===null),ids=state.overrides.filter(o=>dels.some(([,v])=>same(o,v))).map(o=>o.id);
+  if(ids.length)await request(`/rest/v1/seo_cell_overrides?id=in.(${ids.join(',')})`,{method:'DELETE',auth:true});
+  state.overrides=state.overrides.filter(o=>!ids.includes(o.id));doneKeys.push(...dels.map(([k])=>k));
+  doneKeys.forEach(k=>pending.delete(k));message(`已保存 ${items.length} 处修改。`);
+ }catch(e){doneKeys.forEach(k=>pending.delete(k));message(`保存失败：${e.message}。${doneKeys.length?`已保存 ${doneKeys.length} 处，`:''}其余修改还在，可以再点“更新”。`,true);}
+ render();}
+function cancelPending(){const items=pagePending();if(!items.length)return;items.forEach(([k])=>pending.delete(k));message(`已取消 ${items.length} 处修改。`);render();}
+function editBar(){const n=pagePending().length,other={};pending.forEach(v=>{if(v.page!==state.page)other[v.page]=(other[v.page]||0)+1;});
+ const elsewhere=Object.entries(other).map(([pg,c])=>`“${pages[pg]}”页还有 ${c} 处未保存`).join('，');
+ return `<div class="edit-bar${n?' dirty':''}"><span>${n?`有 <b>${n}</b> 处修改还没保存（浅蓝色格子）`:'双击格子修改（关键词表单击），可以连续改多处，最后点“更新”一次保存'}${elsewhere?`；${esc(elsewhere)}`:''}</span><div class="actions"><button id="pending-save" class="primary"${n?'':' disabled'}>更新${n?`（${n}）`:''}</button><button id="pending-cancel"${n?'':' disabled'}>取消编辑</button></div></div>`;}
+window.addEventListener('beforeunload',e=>{if(pending.size){e.preventDefault();e.returnValue='';}});
 function editTable(cols,data,{emptyTitle,emptyDetail,cls=''}={}){
  if(!data.length)return empty(emptyTitle,emptyDetail);
  return `<div class="table-wrap"><table class="edit-table ${cls}"><thead><tr>`+cols.map(c=>`<th class="${c.cls||''}">${esc(c.label)}</th>`).join('')+'</tr></thead><tbody>'+data.map(r=>'<tr>'+cols.map(c=>{const x=c.cell(r)||{};const k=[c.cls,x.cls,x.ed&&state.admin?'editable':'',x.ov?'ov':''].filter(Boolean).join(' ');
@@ -172,7 +210,7 @@ function keywords(){
  if(state.admin)cols.push({label:'',cls:'nw',cell:r=>({html:`<button class="link danger" data-del-kw="${r.k.id}">删除</button>`})});
  const add=state.admin?`<form id="kw-add" class="inline-add"><input name="keyword" placeholder="新关键词" required maxlength="300"><input name="target_url" placeholder="目标页面（网址或 /路径，可留空）"><input name="volume" placeholder="搜索量（可留空）" inputmode="numeric"><button class="primary" type="submit">添加</button></form>`:'';
  const s=snapshot('keywords');
- return panel(`核心关键词（${list.length} 个）`,`<p class="hint">建议保持 20–50 个最重要的词。${state.admin?'单击单元格即可编辑，回车或点到别处保存，Esc 取消。点击量、点击率和排名每月导入后自动更新；手动改过的格子标为浅黄色，清空即恢复为导入数据，填“-”表示留空。':'登录管理员后可编辑。'}</p>`+add+editTable(cols,rowsData,{emptyTitle:'还没有关键词',emptyDetail:'管理员登录后在上方添加。'}))
+ return panel(`核心关键词（${list.length} 个）`,`<p class="hint">建议保持 20–50 个最重要的词。${state.admin?'单击单元格修改，可以连续改多处，改完点上方“更新”一次保存，“取消编辑”放弃这次所有修改。点击量、点击率和排名每月导入后自动更新；手动改过的格子标为浅黄色，清空即恢复为导入数据，填“-”表示留空。':'登录管理员后可编辑。'}</p>`+add+editTable(cols,rowsData,{emptyTitle:'还没有关键词',emptyDetail:'管理员登录后在上方添加。'}))
  +`<p class="hint">点击量、点击率、排名来自当月 GSC 查询词×着陆页明细，排名取曝光最多的那个页面的平均排名；上月排名取上个月导入的数据。趋势按排名变化计算，变化不到 1 名记为持平。搜索量为手动维护（Semrush，美国库）。${s?'':' 本月还没有导入关键词数据。'}</p>`+source(s);}
 
 // ---------------------------------------------------------------- content tracking
@@ -202,7 +240,7 @@ function content(){
  if(state.admin)cols.push({label:'',cls:'nw',cell:r=>({html:`<button class="link danger" data-del-content="${r.id}">删除</button>`})});
  const add=state.admin?`<form id="content-add" class="inline-add"><input name="url" placeholder="新文章网址 https://${esc(site()?.domain)}/blogs/…" required><input name="main_keyword" placeholder="主关键词（可留空）"><button class="primary" type="submit">添加一行</button></form>`:'';
  const t=cs?.payload?.topics||[];
- return panel(`内容追踪（${list.length} 篇）`,`<p class="hint">${state.admin?'双击单元格编辑：单行回车保存，多行文字按 Ctrl+Enter 或点到别处保存，Esc 取消。':'登录管理员后可双击单元格编辑。'}“上次更新”取手动填写的日期和优化记录里最近一次中较晚的那个。Title、Meta 后的小字是字符数。</p>`+add+editTable(cols,data,{emptyTitle:'还没有内容',emptyDetail:'管理员登录后在上方添加。',cls:'content-table'}))
+ return panel(`内容追踪（${list.length} 篇）`,`<p class="hint">${state.admin?'双击单元格修改，可以连续改多处，改完点上方“更新”一次保存，“取消编辑”放弃这次所有修改。':'登录管理员后可双击单元格编辑。'}“上次更新”取手动填写的日期和优化记录里最近一次中较晚的那个。Title、Meta 后的小字是字符数。</p>`+add+editTable(cols,data,{emptyTitle:'还没有内容',emptyDetail:'管理员登录后在上方添加。',cls:'content-table'}))
  +`<p class="hint">当前排名：优先显示主关键词在该页的 GSC 平均排名；主关键词本月没有曝光时，显示页面整体平均排名（标“页均”）。${cs?'':'本月还没有导入 GSC 数据，排名为空。'}主题对应博客计划表的“集群”，备注默认取“植入产品”。</p>`
  +(t.length?panel('主题表现（按篇均点击排序）',table([['topic','主题'],['articles','文章数'],['impressions','曝光'],['clicks','点击'],['clicks_per_article','篇均点击'],['sessions','自然会话']],t)):'')+source(cs);}
 
@@ -338,7 +376,7 @@ function monthly(){
   const raw=x.ov?(x.v==null?'-':String(x.v)):'';
   return `<td class="${[m===cur?'current':'',state.admin?'editable':'',x.ov?'ov':'',x.calc||x.auto?'calc':''].filter(Boolean).join(' ')}"${edAttr('ov',{col:'value',type,row:r.key,site:r.site,grid:'monthly',month:m})} data-raw="${esc(x.ov?raw:(x.v==null||x.auto?'':String(x.v)))}"${tip?` title="${esc(tip)}"`:''}>${esc(r[m])}</td>`;}).join('')+'</tr>').join('');
  const missing=out.filter(r=>r[cur]===''&&!['ahrefs_traffic','page_optimization'].includes(r.key)).length;
- return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。${state.admin?'双击数值格可以直接填写，点“更新”保存、“取消”放弃；曝光量可以写 1.06w 或 10600。要填新月份，先在上方“月份”里选那个月。':'登录管理员后可双击数值格填写。'}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
+ return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。${state.admin?'双击数值格填写，可以连续填多格，填完点上方“更新”一次保存；曝光量可以写 1.06w 或 10600。要填新月份，先在上方“月份”里选那个月。':'登录管理员后可双击数值格填写。'}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
  +'<p class="hint">粘贴方法：在部门表格里选中新月份列的第一个数据格（第 2 行），直接粘贴。“Page优化”一行没有手工填写时，按当月优化记录自动汇总。2026 年 10 月起关键词排名分布统一用 Semrush，与之前的 Ahrefs 数据不可直接比较；Semrush 流量如为月末快照，以数据来源说明为准。</p>';}
 
 // ---------------------------------------------------------------- admin import
@@ -355,7 +393,9 @@ function render(){
  if(state.loading){$('content').innerHTML=empty('正在读取数据','请稍候');return;}
  if(state.error){$('content').innerHTML=empty('数据暂时无法读取',state.error);return;}
  const renderers={overview,opportunities,keywords,content,optimizations,monthly,blog:blogSummary};
- $('content').innerHTML=renderers[state.page]()+(state.admin&&state.page==='monthly'?adminPanel():'');
+ $('content').innerHTML=(state.admin&&EDIT_PAGES.includes(state.page)?editBar():'')+viewWithPending(()=>renderers[state.page]())+(state.admin&&state.page==='monthly'?adminPanel():'');
+ document.querySelectorAll('[data-ed]').forEach(td=>{const k=pendKey(td.dataset);td.dataset.k=k;if(pending.has(k)){td.classList.add('pending');td.title='已修改，点上方“更新”后保存';}});
+ if($('pending-save')){$('pending-save').onclick=savePending;$('pending-cancel').onclick=cancelPending;}
  document.querySelectorAll('#content .table-wrap').forEach((w,i)=>{if(scroll[i])w.scrollLeft=scroll[i];});
  document.querySelectorAll('[data-ed]').forEach(td=>{td[td.dataset.trigger==='click'?'onclick':'ondblclick']=e=>startEdit(td,e);});
  document.querySelectorAll('[data-del-kw]').forEach(b=>b.onclick=()=>deleteRow('seo_keywords',b.dataset.delKw));
@@ -371,8 +411,8 @@ function render(){
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>deleteRecord(b.dataset.del));
  if($('cancel-edit'))$('cancel-edit').onclick=()=>{state.editing=null;render();};
  if($('record-form'))$('record-form').onsubmit=saveRecord;
- if($('copy-monthly'))$('copy-monthly').onclick=()=>copyText(monthlyGrid().out.map(r=>r[month()].replace(/[\t\r\n]/g,' ')).join('\n'),'已复制当月 132 行数值，到部门表格新月份列第一个数据格粘贴。');
- if($('copy-monthly-full'))$('copy-monthly-full').onclick=()=>{const {ms,out}=monthlyGrid();copyText([['网址','调研类目','工具/工作',...ms.map(m=>m.slice(0,7))].join('\t'),...out.map(r=>[r.url,r.cat,r.label,...ms.map(m=>r[m])].map(v=>String(v).replace(/[\t\r\n]/g,' ')).join('\t'))].join('\n'),'已复制整表。');};
+ if($('copy-monthly'))$('copy-monthly').onclick=()=>copyText(viewWithPending(monthlyGrid).out.map(r=>r[month()].replace(/[\t\r\n]/g,' ')).join('\n'),'已复制当月 132 行数值，到部门表格新月份列第一个数据格粘贴。');
+ if($('copy-monthly-full'))$('copy-monthly-full').onclick=()=>{const {ms,out}=viewWithPending(monthlyGrid);copyText([['网址','调研类目','工具/工作',...ms.map(m=>m.slice(0,7))].join('\t'),...out.map(r=>[r.url,r.cat,r.label,...ms.map(m=>r[m])].map(v=>String(v).replace(/[\t\r\n]/g,' ')).join('\t'))].join('\n'),'已复制整表。');};
  if($('import-file'))$('import-file').onchange=previewImport;
 }
 async function copyText(text,ok){try{await navigator.clipboard.writeText(text);message(ok);}catch{message('浏览器未允许复制，请使用导出快照。',true);}}
@@ -389,7 +429,7 @@ async function saveRecord(event){event.preventDefault();const f=event.currentTar
  message(state.editing?'优化记录已修改。':'优化记录已保存。');state.editing=null;await load();}catch(e){message(e.message,true);b.disabled=false;}}
 async function deleteRecord(id){const r=state.records.find(x=>x.id===id);if(!r||!confirm(`删除这条优化记录？\n${r.optimized_on} ${r.page_url}`))return;try{await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'DELETE',auth:true});message('已删除。');await load();}catch(e){message(e.message,true);}}
 async function deleteRow(table,id){const list=table==='seo_content'?state.content:state.keywords,r=list.find(x=>String(x.id)===String(id));if(!r||!confirm(`删除这一行？\n${r.keyword||r.url}`))return;
- try{await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,{method:'DELETE',auth:true});list.splice(list.indexOf(r),1);message('已删除。');render();}catch(e){message(e.message,true);}}
+ try{await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,{method:'DELETE',auth:true});list.splice(list.indexOf(r),1);[...pending.entries()].forEach(([k,v])=>{if(v.ds.id===String(id)&&v.ds.ed===(table==='seo_content'?'content':'keyword'))pending.delete(k);});message('已删除。');render();}catch(e){message(e.message,true);}}
 const nextOrder=list=>list.reduce((a,x)=>Math.max(a,x.sort_order||0),0)+1;
 async function addKeyword(e){e.preventDefault();const f=e.currentTarget,d=Object.fromEntries(new FormData(f)),sid=$('site').value;try{
  const kw=d.keyword.trim();if(!kw)throw Error('请填写关键词');if(state.keywords.some(k=>k.site_id===sid&&k.keyword.trim().toLowerCase()===kw.toLowerCase()))throw Error('这个关键词已经在列表里了');
