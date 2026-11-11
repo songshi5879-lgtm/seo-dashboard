@@ -10,6 +10,7 @@ and monthly_column.xlsx (the value column for the department table).
 import argparse, json, re, statistics
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 from . import config as C
 from .readers import (InputError, read_gsc_zip, read_query_page, read_ga4, read_ga4_with_purchase_flag,
@@ -22,6 +23,24 @@ def pct(a, b):
 
 def full_url(site_id, path):
     return "https://" + C.SITES[site_id]["domain"] + (path if path.startswith("/") else "/" + path)
+
+
+def product_variant_base(path):
+    pathname, _, query = path.partition("?")
+    if "/products/" not in pathname:
+        return path
+    remaining = "&".join(p for p in query.split("&") if unquote_plus(p.partition("=")[0]) != "variant")
+    return pathname + ("?" + remaining if remaining else "")
+
+
+def product_clicks(rows):
+    groups = {}
+    for row in rows:
+        path, clicks = row["path"], row.get("gsc_clicks")
+        if clicks is None or "/products/" not in path:
+            continue
+        groups.setdefault(product_variant_base(path), {})[path] = clicks
+    return groups
 
 
 def first_file(folder, *patterns):
@@ -178,11 +197,6 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
             warnings.append(f"{site_id}：着陆页明细的自然会话（{ga_land['organic']['sessions']:.0f}）与流量获取报告"
                             f"（{ga['organic']['sessions']:.0f}）相差 {diff:.0%}，请确认两份导出的筛选条件一致。")
     checks = []
-    gclk = gsc["totals"]["clicks"]
-    gs = ga["google_organic"]["sessions"]
-    if gclk and gs:
-        ratio = gs / gclk
-        # Descriptive only: GA4 sessions and GSC clicks have no universal expected ratio.
     notset = sum(r["sessions"] or 0 for r in landing if (r.get("path") or "").startswith("(not set)")
                  and classify(r.get("source_medium"), r.get("channel"))[1])
     if ga_land["organic"]["sessions"] and notset / ga_land["organic"]["sessions"] > 0.05:
@@ -191,17 +205,23 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
     # ---- pages (GSC page report first, query x page as fallback; GA4 natural landing rows)
     pages = {}
     for p in gsc.get("pages", []):
-        path = url_path(p["key"])
+        path = p["path"]
         d = pages.setdefault(path, {"path": path})
         d.update(gsc_clicks=p["clicks"], gsc_impressions=p["impressions"], gsc_position=p["position"], gsc_source="网页报告")
     qp_page = {}
     for r in qp:
-        a = qp_page.setdefault(r["path"], [0, 0, 0.0])
-        a[0] += r["impressions"]; a[1] += r["clicks"]; a[2] += (r["position"] or 0) * r["impressions"]
-    for path, a in qp_page.items():
+        qp_page.setdefault(r["path"], []).append(r)
+    for path, queries in qp_page.items():
         d = pages.setdefault(path, {"path": path})
+        for metric, secondary in (("impressions", "clicks"), ("clicks", "impressions")):
+            top = min(queries, key=lambda r: (-r[metric], -r[secondary], r["query"]))
+            if top[metric] > 0:
+                d["top_query_" + metric] = {"query": top["query"], "value": top[metric]}
         if "gsc_clicks" not in d:
-            d.update(gsc_clicks=a[1], gsc_impressions=a[0], gsc_position=round(a[2] / a[0], 2) if a[0] else None,
+            ranked = [r for r in queries if r["position"] is not None]
+            pos = pct(sum(r["position"] * r["impressions"] for r in ranked), sum(r["impressions"] for r in ranked))
+            d.update(gsc_clicks=sum(r["clicks"] for r in queries), gsc_impressions=sum(r["impressions"] for r in queries),
+                     gsc_position=round(pos, 2) if pos is not None else None,
                      gsc_source="查询词明细")
     for r in landing:
         if not classify(r.get("source_medium"), r.get("channel"))[1]:
@@ -209,10 +229,15 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
         path = r.get("path") or "(not set)"
         d = pages.setdefault(path, {"path": path})
         for k in ("sessions", "purchases", "revenue", "items_viewed", "add_to_carts"):
+            if r.get(k) is None:
+                d["_missing_ga_" + k] = True
             d["ga_" + k] = (d.get("ga_" + k) or 0) + (r.get(k) or 0)
         d["_eng_w"] = d.get("_eng_w", 0) + (r.get("avg_engagement") or 0) * (r.get("sessions") or 0)
         d["_er_w"] = d.get("_er_w", 0) + (r.get("engagement_rate") or 0) * (r.get("sessions") or 0)
     for d in pages.values():
+        for k in ("sessions", "purchases", "revenue", "items_viewed", "add_to_carts"):
+            if d.pop("_missing_ga_" + k, False):
+                d["ga_" + k] = None
         s = d.get("ga_sessions") or 0
         d["ga_avg_engagement"] = round(d.pop("_eng_w", 0) / s, 1) if s else None
         d["ga_engagement_rate"] = round(d.pop("_er_w", 0) / s, 4) if s else None
@@ -222,15 +247,14 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
                  or (d.get("ga_sessions") or 0) >= C.PAGES_MIN_SESSIONS]
     page_rows.sort(key=lambda d: (-(d.get("gsc_clicks") or 0), -(d.get("ga_sessions") or 0)))
 
-    pkey = lambda path: path.lower().rstrip("/") or "/"
-    prev_pages = {pkey(d["path"]): d for d in (prev.get("pages", {}).get("rows") or [])}
+    prev_pages = {d["path"]: d for d in (prev.get("pages", {}).get("rows") or [])}
     prev_kw = {k["query"]: k for k in (prev.get("keywords", {}).get("rows") or [])}
     O = []
     lim = C.PER_CATEGORY_LIMIT
 
     # 1 core pages
-    for d in [x for x in page_rows if x["path"].startswith("/")][:C.CORE_TOP_N]:
-        pv = prev_pages.get(pkey(d["path"]))
+    for d in [x for x in page_rows if x["path"].startswith("/") and x.get("gsc_clicks") is not None][:C.CORE_TOP_N]:
+        pv = prev_pages.get(d["path"])
         pc = pv.get("gsc_clicks") if pv else None
         ch = (d["gsc_clicks"] / pc - 1) if pc else None
         alert = ch is not None and ch <= -C.CORE_DROP_ALERT
@@ -246,8 +270,8 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
     if prev_pages:
         dec = []
         for d in page_rows:
-            pv = prev_pages.get(pkey(d["path"]))
-            if not pv or (pv.get("gsc_clicks") or 0) < C.DECLINE_MIN_PREV_CLICKS:
+            pv = prev_pages.get(d["path"])
+            if d.get("gsc_clicks") is None or not pv or (pv.get("gsc_clicks") or 0) < C.DECLINE_MIN_PREV_CLICKS:
                 continue
             ch = (d.get("gsc_clicks") or 0) / pv["gsc_clicks"] - 1
             if ch > -C.DECLINE_MIN_DROP:
@@ -272,6 +296,20 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
         O += dec[:lim]
     else:
         warnings.append(f"{site_id}：没有上月数据，“下滑页面”本月不计算。")
+
+    previous_products = product_clicks(prev_pages.values())
+    for path, members in product_clicks(pages.values()).items():
+        if path not in members or len(members) < 2:
+            continue
+        clicks = sum(members.values())
+        prev_members = previous_products.get(path)
+        previous = sum(prev_members.values()) if prev_members else None
+        delta = pct(clicks, previous)
+        evidence = f"本月主网址和变体共 {len(members)} 个有 GSC 数据的网址，合计点击 {clicks:.0f}"
+        if previous is not None:
+            evidence += f"（上月 {previous:.0f} 点击" + (f"，环比 {delta - 1:+.1%}" if delta is not None else "") + "）"
+        O.append(opp("同产品合计", site_id, path, action="一起核对主网址和变体的表现，查看 Google 选择的规范网址。",
+                     evidence=evidence, clicks=clicks, prev_clicks=previous, change=delta - 1 if delta is not None else None))
 
     # 3 rank 11-20
     thr = C.SITES[site_id].get("rank_min_impr", 30)
@@ -337,8 +375,8 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
             if tot_imp < thr:
                 continue
             top = max(rs, key=lambda r: r["impressions"])
-            if base_path(top["path"]) != base_path(target):
-                tgt = [r for r in rs if base_path(r["path"]) == base_path(target)]
+            if product_variant_base(top["path"]) != product_variant_base(target):
+                tgt = [r for r in rs if product_variant_base(r["path"]) == product_variant_base(target)]
                 mm.append(opp("错位：实际页面≠规划页面", site_id, top["path"], kw,
                               f"规划由 {target} 承接：在规划页补这个词，从实际排名页加内链过去；确认两页分工",
                               f"实际排名页 排名 {top['position']:.1f}、曝光 {top['impressions']:.0f}；规划页"
@@ -381,7 +419,8 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
                          prio=priority(s, 150, 50), sessions=s, purchases=d.get("ga_purchases")))
     if site_conv:
         hi = sorted([d for d in lp if d["ga_sessions"] >= C.CONV_HIGH_TRAFFIC_MIN_SESSIONS
-                     and (d.get("ga_purchases") or 0) / d["ga_sessions"] < C.CONV_LOW_RATIO * site_conv],
+                     and d.get("ga_purchases") is not None
+                     and d["ga_purchases"] / d["ga_sessions"] < C.CONV_LOW_RATIO * site_conv],
                     key=lambda d: -d["ga_sessions"])
         for d in hi[:lim]:
             atc = d.get("ga_add_to_carts") or 0
@@ -452,7 +491,8 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
         imp = sum(r["impressions"] for r in rs)
         clk = sum(r["clicks"] for r in rs)
         top = max(rs, key=lambda r: r["impressions"]) if rs else None
-        status = ("本月无曝光" if not top else "一致" if not target or base_path(top["path"]) == base_path(target) else "错位")
+        status = ("本月无曝光" if not top else "一致"
+                  if not target or product_variant_base(top["path"]) == product_variant_base(target) else "错位")
         pv = prev_kw.get(kw)
         kw_rows.append({"query": kw, "position": top["position"] if top else None,
                         "previous_position": pv.get("position") if pv else None,
@@ -463,20 +503,13 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
 
     # ---- content (blog performance)
     unidx = {base_path(u["path"]): u["reason"] for u in unindexed}
-    pmap = {}
-    for d in pages.values():
-        if d["path"].startswith("/"):
-            pmap.setdefault(base_path(d["path"]), d)
-    qp_by_path = {}
-    for r in qp:
-        qp_by_path.setdefault(base_path(r["path"]), []).append(r)
     content_rows = []
     articles = blog or [{"path": d["path"], "title": None, "published_on": None, "topic": None}
                         for d in page_rows if page_type(d["path"]) == "博客"]
     for a in articles:
-        d = pmap.get(base_path(a["path"]), {})
+        d = pages.get(a["path"], {})
         kw = (a.get("main_keyword") or "").strip().lower()
-        hit = [r for r in qp_by_path.get(base_path(a["path"]), []) if kw and r["query"] == kw]
+        hit = [r for r in qp_page.get(a["path"], []) if kw and r["query"] == kw]
         k_imp = sum(r["impressions"] for r in hit)
         k_pos = round(sum((r["position"] or 0) * r["impressions"] for r in hit) / k_imp, 1) if k_imp else None
         pub = a.get("published_on")
@@ -531,16 +564,19 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
     }
     O.sort(key=lambda r: ({"高": 0, "中": 1, "低": 2}[r["priority"]],))
     files = [str(p.name) for p in sorted(folder.iterdir())]
-    prov = {"files": files, "date_range": f"{ms} 至 {me}", "ga4_columns": {"landing": land_cols, "acquisition": acq_cols},
+    prov = {"files": files, "date_range": f"{ms} 至 {me}", "gsc_full_month": gsc["totals"]["days"] == me.day,
+            "ga4_columns": {"landing": land_cols, "acquisition": acq_cols},
             "organic_definition": "Organic Search/Shopping/Social/Video + AI Assistant（含被归入其他渠道的 AI 来源），"
                                   "剔除 bing / search_bra、bing / pla", "gsc_query_coverage":
                 f"查询词明细点击 {sum(r['clicks'] for r in qp):.0f} / 总点击 {gsc['totals']['clicks']:.0f}"}
+    saved_paths = {d["path"] for d in page_rows}
     return {
         "overview": overview,
         "opportunities": {"rows": O},
         "keywords": {"rows": kw_rows},
         "content": {"rows": content_rows, "topics": sorted(topics.values(), key=lambda t: -t["clicks_per_article"])},
-        "pages": {"rows": [{k: v for k, v in d.items() if not k.startswith("_")} for d in page_rows[:3000]]},
+        "pages": {"rows": [d for d in pages.values() if d["path"].startswith("/")
+                           and ("gsc_clicks" in d or d["path"] in saved_paths)]},
     }, prov
 
 

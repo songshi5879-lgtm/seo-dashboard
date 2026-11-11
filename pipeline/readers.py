@@ -150,7 +150,41 @@ def url_path(u):
         sp = urlsplit(u)
         p = sp.path or "/"
         return p + ("?" + sp.query if sp.query else "")
+    u = u.split("#", 1)[0]
     return u if u.startswith("/") else "/" + u
+
+
+def merge_gsc_anchors(rows, warnings, source, by_query=False):
+    """Aggregate exact URL rows, then collapse only fragment differences."""
+    groups = {}
+    for row in rows:
+        raw = row["key"]
+        path = url_path(raw)
+        query = row.get("query")
+        fragment = raw.partition("#")[1:]
+        exact = groups.setdefault((query, path), {})
+        counts = exact.setdefault(fragment, [0, 0, 0, 0])
+        counts[0] += row["clicks"]
+        counts[1] += row["impressions"]
+        if row["position"] is not None:
+            counts[2] += row["position"] * row["impressions"]
+            counts[3] += row["impressions"]
+    out = []
+    affected = set()
+    for (query, path), exact in groups.items():
+        main = exact.get(("", "")) or max(exact.values(), key=lambda r: r[1])
+        clicks = sum(row[0] for row in exact.values())
+        if any(marker for marker, _ in exact):
+            affected.add(path)
+        result = {"path": path, "clicks": clicks, "impressions": main[1],
+                  "position": round(main[2] / main[3], 2) if main[3] else None}
+        if by_query:
+            result["query"] = query
+        out.append(result)
+    if affected:
+        warnings.append(f"{source}：锚点归并涉及 {len(affected)} 个页面。")
+        warnings.extend(f"{source} 锚点：{path}" for path in sorted(affected))
+    return out
 
 
 def base_path(p):
@@ -255,6 +289,7 @@ def read_gsc_zip(path, month, warnings):
             out[k] = metrics(*tables[k])
     if "pages" in out and len(out["pages"]) >= 1000:
         warnings.append(f"{src}：网页表达到 1000 行上限，长尾页面以“查询词×页面”数据补充。")
+    out["pages"] = merge_gsc_anchors(out.get("pages", []), warnings, src)
     return out
 
 
@@ -269,28 +304,22 @@ def read_query_page(path, month, warnings):
     ipos = find_col(header, ["average position", "平均排名", "position", "排名"], exclude={iq, ip}, source=src, label="平均排名")
     idt = find_col(header, ["date", "日期"], required=False, exclude={iq, ip, ii, ic, ipos})
     if idt is not None:
-        ds = [num(r[idt]) for r in rows]
         vals = sorted(str(r[idt])[:10] for r in rows if r[idt])
         ms, me = month_bounds(month)
         if vals and (vals[0] < str(ms) or vals[-1] > str(me)):
             raise InputError(f"{src}：日期 {vals[0]} 至 {vals[-1]} 超出 {month}。")
     else:
         warnings.append(f"{src}：导出没有日期列，按 {month} 处理，请确认 Looker Studio 里选的是整月。")
-    agg = {}
+    detail = []
     for r in rows:
         if len(r) <= max(iq, ip, ii, ic, ipos):
             continue
         q = str(r[iq]).strip().strip('"').strip().lower()
         if not q or q.lower() in ("total", "总计", "grand total"):
             continue
-        p = url_path(r[ip])
         impr, clk, pos = num(r[ii]) or 0, num(r[ic]) or 0, num(r[ipos])
-        a = agg.setdefault((q, p), [0, 0, 0.0])
-        a[0] += impr
-        a[1] += clk
-        a[2] += (pos or 0) * impr
-    out = [{"query": q, "path": p, "impressions": a[0], "clicks": a[1],
-            "position": round(a[2] / a[0], 2) if a[0] else None} for (q, p), a in agg.items()]
+        detail.append({"query": q, "key": str(r[ip]).strip(), "impressions": impr, "clicks": clk, "position": pos})
+    out = merge_gsc_anchors(detail, warnings, src, by_query=True)
     if not out:
         raise InputError(f"{src}：没有读到数据行。")
     return out
@@ -301,8 +330,8 @@ GA_DIMS = {
     "landing": ["着陆页 + 查询字符串", "着陆页", "landing page + query string", "landing page"],
     "source_medium": ["会话来源/媒介", "session source / medium", "带来会话的来源/媒介", "来源/媒介", "source / medium",
                       "会话来源", "session source"],
-    "channel": ["会话默认渠道组", "会话主要渠道组", "带来会话的主渠道组", "session default channel group",
-                "session primary channel group", "默认渠道组", "渠道组"],
+    "channel": ["会话默认渠道组", "会话主要渠道组", "会话主渠道组", "带来会话的主渠道组",
+                "带来会话的默认渠道组", "session default channel group", "session primary channel group"],
 }
 GA_METRICS = {
     "sessions": ["会话数", "sessions", "会话"],
@@ -328,8 +357,11 @@ def read_ga4(path, month, warnings, need_landing, allow_partial=False):
     else:
         check_range(s, e, month, src, warnings, required=False)
     cols = {}
+    first_user = {i for i, h in enumerate(header) if "首次" in str(h) or "firstuser" in norm(h)}
     for k, al in GA_DIMS.items():
-        cols[k] = find_col(header, al, required=(k == "landing" and need_landing), source=src)
+        cols[k] = find_col(header, al, required=(k == "landing" and need_landing), exclude=first_user, source=src)
+    if first_user and cols["channel"] is None:
+        warnings.append(f"{src}：已排除首触渠道维度；渠道按会话来源/媒介识别。")
     if cols["source_medium"] is None and cols["channel"] is None:
         raise InputError(f"{src}：需要“会话来源/媒介”或“会话渠道组”至少一列。")
     used = {i for i in cols.values() if i is not None}
