@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const pages={overview:'总览',opportunities:'机会清单',keywords:'关键词监控',content:'内容追踪',optimizations:'优化记录',monthly:'月度数据表',blog:'博客数据总结表'};
-const state={page:'overview',sites:[],snapshots:[],records:[],content:[],keywords:[],overrides:[],session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
+const state={page:'overview',sites:[],snapshots:[],records:[],content:[],keywords:[],overrides:[],notes:{},guidance:{},session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
 const SECTIONS=['overview','opportunities','keywords','content','monthly','pages','blog_summary'];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=0)=>v==null||Number.isNaN(+v)?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:d});
@@ -10,7 +10,8 @@ const site=()=>state.sites.find(s=>s.id===$('site').value);
 const month=()=>$('month').value+'-01';
 const shiftMonth=(m,n)=>{const d=new Date(m.slice(0,7)+'-01T00:00:00Z');d.setUTCMonth(d.getUTCMonth()+n);return d.toISOString().slice(0,10);};
 const daysIn=m=>new Date(Date.UTC(+m.slice(0,4),+m.slice(5,7),0)).getUTCDate();
-const keyPath=u=>{try{const x=new URL(u,'https://x.invalid');return ((x.pathname.replace(/\/+$/,'')||'/')+x.search).toLowerCase();}catch{return String(u||'').toLowerCase();}};
+const keyPath=u=>{try{const x=new URL(u,'https://x.invalid');return x.pathname+x.search;}catch{return String(u??'');}};
+const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 function message(text,error=false){$('notice').innerHTML=text?`<div class="note ${error?'error':''}">${esc(text)}</div>`:'';}
 async function request(path,{method='GET',body,auth=false,prefer}={}){
  if(auth&&!state.session)throw Error('请先登录管理员');
@@ -19,7 +20,8 @@ async function request(path,{method='GET',body,auth=false,prefer}={}){
  if(prefer)headers.Prefer=prefer;
  const r=await fetch(SEO_CONFIG.url+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});
  const raw=await r.text();let data;try{data=raw?JSON.parse(raw):null;}catch{throw Error('服务返回无法识别的内容');}
- if(!r.ok){if(r.status===401&&state.session){state.session=null;state.admin=false;}throw Error(data?.msg||data?.message||data?.error_description||`连接失败 (${r.status})`);}return data;
+ if(!r.ok){if(r.status===401&&state.session){state.session=null;state.admin=false;state.notes={};state.guidance={};}
+  throw Object.assign(Error(data?.msg||data?.message||data?.error_description||`连接失败 (${r.status})`),{code:data?.code});}return data;
 }
 async function rows(table,query=''){return await request('/rest/v1/'+table+'?'+query);}
 async function paged(t,q){let result=[];for(let offset=0;;offset+=500){const batch=await rows(t,q+'&limit=500&offset='+offset);result.push(...batch);if(batch.length<500)return result;}}
@@ -42,7 +44,7 @@ function cell(v,type){
 function table(columns,data,{emptyTitle,emptyDetail}={}){if(!data.length)return empty(emptyTitle,emptyDetail);return '<div class="table-wrap"><table><thead><tr>'+columns.map(c=>`<th>${esc(c[1])}</th>`).join('')+'</tr></thead><tbody>'+data.map(row=>'<tr>'+columns.map(([k,,type])=>`<td class="${typeof row[k]==='number'||['pct','pos','money','prio','badge','change','bool'].includes(type)?'nw':''}">${cell(row[k],type)}</td>`).join('')+'</tr>').join('')+'</tbody></table></div>';}
 function snapshot(section,siteId=$('site').value,m=month()){return state.snapshots.find(s=>s.section===section&&s.site_id===siteId&&s.month===m);}
 function filtered(data){const q=$('search').value.toLowerCase().trim();return q?data.filter(r=>Object.values(r).some(v=>String(v??'').toLowerCase().includes(q))):data;}
-function source(s){return s?`<details class="hint"><summary>数据来源与口径${s.published?'':' · 草稿，仅管理员可见'}</summary><pre class="mono">${esc(JSON.stringify(s.provenance,null,2))}</pre></details>`:'';}
+function source(s){const notes=state.admin&&state.notes[s?.id];return notes?`<details class="hint"><summary>数据来源与口径${s.published?'':' · 草稿'}</summary><pre class="mono">${esc(JSON.stringify(notes.provenance,null,2))}</pre></details>`:'';}
 function card(label,value,subtitle){return `<div class="card"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="hint">${subtitle}</div></div>`;}
 function mom(now,prev,m,{daily=true,invert=false}={}){const c=change(now,prev);if(c==null)return '环比 —';let s='环比 '+changeHtml(c,invert);if(daily&&now!=null&&prev){const d=(now/daysIn(m))/(prev/daysIn(shiftMonth(m,-1)))-1;s+='，日均 '+changeHtml(d,invert);}return s;}
 
@@ -60,11 +62,14 @@ function overview(){
  const go=p.ga4?.google_organic||{},ai=p.ga4?.ai||{},pgo=prev.ga4?.google_organic||{},pai=prev.ga4?.ai||{};
  html+=`<div class="cards">${card('其中 Google 自然搜索',fmt(go.sessions)+' <small>会话</small>',`订单 ${fmt(go.purchases)}，收入 $${fmt(go.revenue,0)}；${mom(go.sessions,pgo.sessions,m,{daily:false})}`)}
  ${card('其中 AI 助手',fmt(ai.sessions)+' <small>会话</small>',`订单 ${fmt(ai.purchases)}，收入 $${fmt(ai.revenue,0)}；${mom(ai.sessions,pai.sessions,m,{daily:false})}`)}
- ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions?fmt(go.sessions/g.clicks,2):'—','会话与点击口径不同，无统一正常范围')}
- ${card('数据提醒',String((p.checks||[]).length),(p.checks||[]).map(esc).join('<br>')||'无')}</div>`;
+ ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions!=null?fmt(go.sessions/g.clicks,2):'—',state.admin?esc(state.guidance.session_ratio):'')}
+ ${state.admin?card('数据提醒',String((state.notes[s.id]?.checks||[]).length),(state.notes[s.id]?.checks||[]).map(esc).join('<br>')||'无'):''}</div>`;
  html+=panel('月度趋势',trendTable());
  html+=panel('自然渠道汇总',table([['channel','渠道'],['sessions','会话'],['purchases','订单'],['revenue','收入','money'],['conversion','转化率','pct']],p.ga4?.by_channel||[]));
- html+=panel('来源 / 媒介明细',table([['channel','渠道'],['source_medium','来源 / 媒介'],['sessions','会话'],['purchases','订单'],['revenue','收入','money'],['included','计入自然','bool'],['note','说明']],filtered(p.ga4?.channels||[]))+'<p class="hint">AI 来源无论被 GA4 归到哪个渠道，都按“AI Assistant”计入。bing / search_bra、bing / pla 已确认为 Bing 广告，不计入自然流量。</p>');
+ const channels=(p.ga4?.channels||[]).map(({note,...row},i)=>state.admin?{...row,note:state.notes[s.id]?.channel_notes[i]}:row);
+ const channelColumns=[['channel','渠道'],['source_medium','来源 / 媒介'],['sessions','会话'],['purchases','订单'],['revenue','收入','money'],['included','计入自然','bool']];
+ if(state.admin)channelColumns.push(['note','说明']);
+ html+=panel('来源 / 媒介明细',table(channelColumns,filtered(channels))+(state.admin?`<p class="hint">${esc(state.guidance.channels)}</p>`:''));
  html+=`<div class="grid2">${panel('设备表现',table([['device','设备'],['clicks','点击'],['impressions','曝光'],['ctr','点击率','pct'],['position','排名','pos']],p.devices||[]))}${panel('国家表现（前 15）',table([['country','国家'],['clicks','点击'],['impressions','曝光'],['ctr','点击率','pct'],['position','排名','pos']],p.countries||[]))}</div>`;
  return html+source(s);
 }
@@ -75,19 +80,28 @@ function trendTable(){
   return {month:m.slice(0,7),clicks:g.clicks??monthlyRaw('gsc_clicks',mo,sid,m,O).v,impr:g.impressions??monthlyRaw('gsc_impressions',mo,sid,m,O).v,ctr:g.ctr,pos:g.position,sessions:n.sessions,orders:n.purchases,revenue:n.revenue,ai:o.ga4?.ai?.sessions,kw,kwtool:kw==null?null:'Semrush'};});
  const max=Math.max(1,...data.map(d=>d.clicks||0));
  const bars=`<div class="bars" role="img" aria-label="GSC 点击按月趋势">${data.map(d=>`<div class="bar-item"><strong>${fmt(d.clicks)}</strong><div class="bar" style="height:${Math.max(2,(d.clicks||0)/max*120)}px"></div>${esc(d.month)}</div>`).join('')}</div>`;
- return bars+table([['month','月份'],['clicks','GSC 点击'],['impr','GSC 曝光'],['ctr','点击率','pct'],['pos','平均排名','pos'],['sessions','自然会话'],['orders','订单'],['revenue','收入','money'],['ai','AI 会话'],['kw','关键词总数'],['kwtool','排名工具']],data)+'<p class="hint">关键词总数各月均使用 Semrush，与月度数据表同步，手填值优先。9 月着陆页 GA4 明细仅覆盖 9 月 9–30 日；总览会话、订单和收入使用整月流量获取数据。</p>';
+ return bars+table([['month','月份'],['clicks','GSC 点击'],['impr','GSC 曝光'],['ctr','点击率','pct'],['pos','平均排名','pos'],['sessions','自然会话'],['orders','订单'],['revenue','收入','money'],['ai','AI 会话'],['kw','关键词总数'],['kwtool','排名工具']],data);
 }
 
 // ---------------------------------------------------------------- opportunities
-const OPP_GROUPS=['核心页面','下滑页面','排名11–20（产品/集合页）','排名11–20（博客）','排名11–20（其他）','点击率偏低','错位：实际页面≠规划页面','机会词：未规划承接页','互动差','流量高、转化低','流量低、转化高','未收录','新文章无曝光','广告有转化、自然排名弱'];
+const OPP_GROUPS=['核心页面','下滑页面','同产品合计','排名11–20（产品/集合页）','排名11–20（博客）','排名11–20（其他）','点击率偏低','错位：实际页面≠规划页面','机会词：未规划承接页','互动差','流量高、转化低','流量低、转化高','未收录','新文章无曝光','广告有转化、自然排名弱'];
 function opportunities(){
  const s=snapshot('opportunities');const all=s?.payload?.rows||[];
  const counts={};all.forEach(r=>counts[r.category]=(counts[r.category]||0)+1);
  const cats=[...OPP_GROUPS.filter(c=>counts[c]),...Object.keys(counts).filter(c=>!OPP_GROUPS.includes(c))];
  const chips=`<div class="chips"><button class="chip ${state.oppCat?'':'active'}" data-cat="">全部 ${all.length}</button>${cats.map(c=>`<button class="chip ${state.oppCat===c?'active':''}" data-cat="${esc(c)}">${esc(c)} ${counts[c]}</button>`).join('')}</div>`;
- const data=filtered(all.filter(r=>!state.oppCat||r.category===state.oppCat));
- return panel('待处理机会',chips+table([['priority','优先级','prio'],['category','类型'],['page_url','页面','url'],['query','查询词'],['impressions','曝光'],['clicks','点击'],['ctr','点击率','pct'],['position','排名','pos'],['sessions','自然会话'],['purchases','订单'],['evidence','判断依据'],['action','建议动作']],data))
- +panel('判断口径','<ul class="rule-list"><li>核心页面：自然点击前 10，环比跌幅超过 20% 标为高优先级。</li><li>下滑页面：上月点击 ≥20 且下降 ≥20%，按“排名下降 / 点击率下降 / 曝光下降”判断原因，只作排查线索。</li><li>排名 11–20：平均排名 10.5–20.5；曝光门槛 Autel ≥80，Launch 与美国站 ≥30；排除小语种页面。</li><li>点击率偏低：排除购物类长标题查询后，低于本站同排名段平均值的 60%；通用参考值（第 1–3 名 15–30%、4–7 名 5–10%、8–10 名 2–5%）仅作对照。</li><li>错位与机会词：对照关键词归属表。</li><li>互动差：自然会话 ≥20，且平均互动时长低于全站一半或互动率 <50%。</li><li>转化：与本站自然流量整体转化率比较。</li><li>未收录：GSC 导出当天的快照。</li></ul>')+source(s);}
+ const queued=new Set(state.records.filter(r=>r.site_id===site()?.id&&!r.optimized_on).map(r=>keyPath(r.page_url)));
+ const data=filtered(all.map(({action,...r},i)=>state.admin?{...r,action:state.notes[s.id]?.actions[i]}:r)
+  .filter(r=>!state.oppCat||r.category===state.oppCat)).map(r=>{
+   if(!state.admin)return r;
+   const added=r.page_url&&queued.has(keyPath(r.page_url));
+   return {...r,queue:`<button class="link nw" data-queue="${esc(r.page_url)}" ${added||!r.page_url?'disabled':''} ${!r.page_url?'title="该机会暂无页面网址"':''}>${added?'已加入':'加入优化清单'}</button>`};
+  });
+ const columns=[['priority','优先级','prio'],['category','类型'],['page_url','页面','url'],['query','查询词'],['impressions','曝光'],['clicks','点击'],['ctr','点击率','pct'],['position','排名','pos'],['sessions','自然会话'],['purchases','订单'],['evidence','判断依据']];
+ if(state.admin)columns.push(['action','建议动作'],['queue','优化清单','html']);
+ const rules=state.admin&&(state.guidance.opportunities||[]);
+ return panel('待处理机会',chips+table(columns,data))
+  +(rules?.length?panel('判断口径',`<ul class="rule-list">${rules.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`):'')+source(s);}
 
 // ---------------------------------------------------------------- editable cells (shared)
 const pathOf=u=>{try{const x=new URL(u,'https://x.invalid');return (decodeURI(x.pathname).replace(/\/+$/,'')||'/').toLowerCase();}catch{return String(u||'').toLowerCase();}};
@@ -214,7 +228,7 @@ function keywords(){
  +`<p class="hint">点击量、点击率、排名来自当月 GSC 查询词×着陆页明细，排名取曝光最多的那个页面的平均排名；上月排名取上个月导入的数据。趋势按排名变化计算，变化不到 1 名记为持平。搜索量为手动维护（Semrush，美国库）。${s?'':' 本月还没有导入关键词数据。'}</p>`+source(s);}
 
 // ---------------------------------------------------------------- content tracking
-function latestOpt(siteId,url){const k=pathOf(url);let best=null;state.records.forEach(r=>{if(r.site_id===siteId&&pathOf(r.page_url)===k&&(!best||r.optimized_on>best))best=r.optimized_on;});return best;}
+function latestOpt(siteId,url){const k=keyPath(url);let best=null;state.records.forEach(r=>{if(r.site_id===siteId&&r.optimized_on&&keyPath(r.page_url)===k&&(!best||r.optimized_on>best))best=r.optimized_on;});return best;}
 function content(){
  const sid=$('site').value,m=month(),cs=snapshot('content',sid,m),ps=snapshot('pages',sid,m);
  const perf={};(cs?.payload?.rows||[]).forEach(r=>perf[pathOf(r.page_url)]=r);
@@ -328,35 +342,82 @@ function blogSummary(){
 const isNumT=t=>['int','num2','money','dur','pct','share','diff'].includes(t);
 
 // ---------------------------------------------------------------- optimizations
-function pageRow(m,url){const s=snapshot('pages',$('site').value,m);if(!s)return undefined;const k=keyPath(url);return (s.payload.rows||[]).find(r=>keyPath(r.path)===k)||null;}
-function cmpCell(before,after,mb,ma){
- if(before===undefined&&after===undefined)return '<span class="muted">缺少前后月份数据</span>';
- const partial=m=>{const r=snapshot('pages',$('site').value,m)?.provenance?.ga4_landing_date_range;return r&&r!==`${m} 至 ${m.slice(0,8)+String(daysIn(m)).padStart(2,'0')}`;};
- const partialGA=partial(mb)||partial(ma);
- const line=(label,k,type)=>{const b=before?.[k],a=after?.[k];const c=k==='gsc_position'?(b!=null&&a!=null?b-a:null):change(a,b);
-  const cs=c==null||partialGA&&k.startsWith('ga_')?'—':k==='gsc_position'?`<span class="${c>0?'positive':c<0?'negative':''}">${c>0?'+':''}${fmt(c,1)}</span>`:changeHtml(c);
-  return `${label} ${type==='pos'?fmt(b,1):fmt(b)} → ${after===undefined?'待下月':type==='pos'?fmt(a,1):fmt(a)} ${after===undefined?'':cs}`;};
- return `<div class="cmp">${esc(mb.slice(0,7))} → ${esc(ma.slice(0,7))}<br>${line('点击','gsc_clicks')}<br>${line('曝光','gsc_impressions')}<br>${line('排名','gsc_position','pos')}<br>${line('自然会话','ga_sessions')}<br>${line('订单','ga_purchases')}${partialGA?'<br><span class="muted">9月页面GA4仅9月9–30日，会话/订单不计算整月变化率。</span>':''}</div>`;}
+const OPT_CATEGORIES=['Title/Meta','内容','内链','技术','其他'];
+function completePages(s){
+ const days=snapshot('overview',s.site_id,s.month)?.payload?.gsc?.days;
+ return s.provenance?.gsc_full_month??(days==null||days===daysIn(s.month));
+}
+function comparisonMonths(record,records,snapshots,currentMonth){
+ const optimized=record.optimized_on.slice(0,7)+'-01';
+ const later=records.filter(r=>r.optimized_on>record.optimized_on&&keyPath(r.page_url)===keyPath(record.page_url))
+  .map(r=>r.optimized_on).sort()[0];
+ const end=later?later.slice(0,7)+'-01':currentMonth;
+ const before=shiftMonth(optimized,-1),firstAfter=shiftMonth(optimized,1);
+ const after=snapshots.filter(s=>s.month>=firstAfter&&s.month<currentMonth&&s.month<end)
+  .map(s=>s.month).sort().at(-1);
+ return {before,after,firstAfter,closed:!!later&&end<=currentMonth};
+}
+function cmpCell(record,records,snapshots){
+ const {before,after,firstAfter,closed}=comparisonMonths(record,records,snapshots,today().slice(0,7)+'-01');
+ const path=keyPath(record.page_url);
+ const pageAt=m=>{
+  const s=snapshots.find(x=>x.month===m);
+  const row=s?.payload?.rows?.find(r=>keyPath(r.path)===path);
+  const range=s?.provenance?.ga4_landing_date_range;
+  const partial=range&&range!==`${m} 至 ${m.slice(0,8)+String(daysIn(m)).padStart(2,'0')}`;
+  return {s,row,partial};
+ };
+ const b=pageAt(before),a=pageAt(after);
+ const line=(label,k,digits=0)=>{
+  const ga=k.startsWith('ga_'),bv=ga&&b.partial?null:b.row?.[k],av=ga&&a.partial?null:a.row?.[k];
+  const rank=k==='gsc_position',delta=rank&&bv!=null&&av!=null?bv-av:change(av,bv);
+  const changeLabel=rank&&delta!=null?` <span class="${delta>0?'positive':delta<0?'negative':''}">${delta>0?'+':''}${fmt(delta,1)}</span>`:delta==null?'':' '+changeHtml(delta);
+  return `${label} ${fmt(bv,digits)} → ${fmt(av,digits)}${changeLabel}`;
+ };
+ const query=(label,k)=>{const show=v=>v?`${esc(v.query)}（${fmt(v.value)}）`:'—';return `${label} ${show(b.row?.[k])} → ${show(a.row?.[k])}`;};
+ const statuses=[];
+ if(!b.s)statuses.push('优化前完整月尚无数据');
+ if(!after)statuses.push(closed?'两次优化之间暂无可用的完整月数据':`等待 ${firstAfter.slice(0,7)} 或之后的完整月数据`);
+ if(b.partial||a.partial)statuses.push('部分月份缺少整月页面 GA4 数据');
+ return `<div class="cmp"><strong>${esc(before.slice(0,7))} → ${after?esc(after.slice(0,7)):'—'}</strong><br>${line('点击','gsc_clicks')}<br>${line('曝光','gsc_impressions')}<br>${line('排名','gsc_position',1)}<br>${line('自然会话','ga_sessions')}<br>${line('订单','ga_purchases')}<br>${query('曝光量最高的 query','top_query_impressions')}<br>${query('点击次数最多的 query','top_query_clicks')}${statuses.map(s=>`<br><span class="muted">${esc(s)}</span>`).join('')}</div>`;
+}
+function recordFields(record){
+ const date=record?(record.optimized_on||''):today();
+ return `<label>优化日期<input name="optimized_on" type="date" max="${today()}" required value="${esc(date)}"></label>
+ <label>优化类型<select name="category" required><option value="">请选择</option>${OPT_CATEGORIES.map(x=>`<option ${record?.category===x?'selected':''}>${x}</option>`).join('')}</select></label>
+ <label class="inline"><input name="published" type="checkbox" ${!record||record.published?'checked':''}>公开显示此记录</label>
+ <label class="wide">优化内容（选填）<textarea name="description" maxlength="5000">${esc(record?.description||'')}</textarea></label>`;
+}
 function optimizations(){
- let html='';const e=state.editing?state.records.find(r=>r.id===state.editing):null;
- if(state.admin)html+=panel(e?'修改优化记录':'新增优化记录',`<form id="record-form" class="record-form"><label>页面网址<input name="page_url" type="url" placeholder="https://${esc(site()?.domain)}/…" required value="${esc(e?.page_url||'')}"></label><label>优化日期<input name="optimized_on" type="date" required value="${esc(e?.optimized_on||new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()))}"></label><label>优化类型<select name="category">${['Title/Meta','内容','内链','技术','其他'].map(x=>`<option ${e?.category===x?'selected':''}>${x}</option>`).join('')}</select></label><label class="inline"><input name="published" type="checkbox" ${!e||e.published?'checked':''}>公开显示此记录</label><label class="wide">优化内容<textarea name="description" maxlength="5000" required>${esc(e?.description||'')}</textarea></label><div class="wide actions"><button class="primary" type="submit">${e?'保存修改':'保存到数据库'}</button>${e?'<button type="button" id="cancel-edit">取消修改</button>':''}</div></form>`);
- const recs=filtered(state.records.filter(x=>x.site_id===$('site').value)).map(x=>{const m=x.optimized_on.slice(0,7)+'-01',mb=shiftMonth(m,-1),ma=shiftMonth(m,1);
-  return {...x,visibility:x.published?'已发布':'草稿',compare:cmpCell(pageRow(mb,x.page_url),pageRow(ma,x.page_url),mb,ma),
-   ops:state.admin?`<button class="link" data-edit="${esc(x.id)}">修改</button> <button class="link danger" data-del="${esc(x.id)}">删除</button>`:''};});
+ let html='';
+ const sid=$('site').value,all=state.records.filter(r=>r.site_id===sid),e=all.find(r=>r.id===state.editing);
+ const completed=all.filter(r=>r.optimized_on),snapshots=state.snapshots.filter(s=>s.site_id===sid&&s.section==='pages'&&completePages(s));
+ const actions=(r,label)=>`<button class="link" data-edit="${esc(r.id)}">${label}</button> <button class="link danger" data-del="${esc(r.id)}">删除</button>`;
+ if(state.admin){
+  html+=panel(e?(e.optimized_on?'修改优化记录':'补充优化记录'):'新增优化记录',`<form id="record-form" class="record-form"><label>页面网址<input name="page_url" type="url" placeholder="https://${esc(site()?.domain)}/…" required value="${esc(e?.page_url||'')}" ${e&&!e.optimized_on?'readonly':''}></label>${recordFields(e)}<div class="wide actions"><button class="primary" type="submit">保存记录</button>${e?'<button type="button" id="cancel-edit">取消修改</button>':''}</div></form>`);
+  html+=panel('批量新增优化记录',`<details><summary>批量录入</summary><form id="record-batch" class="record-form"><label class="wide">页面网址（每行一个，共用下方日期和类型）<textarea name="page_urls" rows="5" required></textarea></label>${recordFields()}<div class="wide actions"><button class="primary" type="submit">批量保存</button></div></form></details>`);
+  const queue=filtered(all.filter(r=>!r.optimized_on)).map(r=>({...r,ops:actions(r,'补充记录')}));
+  html+=panel('优化清单',table([['page_url','页面','url'],['ops','操作','html']],queue,{emptyTitle:'暂无待补充的页面',emptyDetail:'可从机会清单加入页面。'}));
+ }
+ const recs=filtered(completed).map(r=>({...r,visibility:r.published?'已发布':'草稿',
+  compare:cmpCell(r,completed,snapshots),ops:state.admin?actions(r,'修改'):''}));
  const cols=[['optimized_on','优化日期'],['page_url','页面','url'],['category','类型'],['description','优化内容'],['compare','优化前后（整月对比）','html'],['visibility','状态']];
  if(state.admin)cols.push(['ops','操作','html']);
  html+=panel('优化历史',table(cols,recs,{emptyTitle:'暂无优化记录',emptyDetail:'管理员登录后可在这里新增。'}));
- return html+'<p class="hint">对比取优化当月的前一个月和后一个月的整月数据，不含优化当月。严格的前后各 28 天对比，需要对该页面单独导出对应日期的数据。“待下月”表示后一个月的数据还没导入。</p>';}
+ return html+(state.admin?'<p class="hint">优化前取上一个自然月。优化后取最近已导入的完整月，截止同一页面下次优化的前一个月。Query 取当月查询词×页面明细。</p>':'');}
 
 // ---------------------------------------------------------------- monthly (department format)
 const MONTHLY_ROWS=[['semrush_traffic','网站流量','Semrush（平均自然流量）'],['gsc_clicks',null,'GSC（点击量）'],['gsc_impressions',null,'GSC（曝光量）'],['ahrefs_traffic',null,'Ahrefs（平均自然流量）'],['rank_1_3','关键词','1-3 网站关键词（{t}）'],['rank_4_10',null,'4-10 网站关键词（{t}）'],['rank_11_20',null,'11-20网站关键词（{t}）'],['rank_21_50',null,'21-50网站关键词（{t}）'],['rank_51_plus',null,'51+网站关键词（{t}）'],['rank_total',null,'总数'],['page_optimization','Page优化','优化页面Title, Description, QA']];
+const SERP_ROWS=[['ai_overview',null,'AI Overview'],['serp_featured_results',null,'SERP 精选结果']];
+const MONTHLY_DISPLAY_ROWS=MONTHLY_ROWS.flatMap(row=>row[0]==='rank_51_plus'?[row,...SERP_ROWS]:[row]);
+const DEPARTMENT_KEYS=new Set(MONTHLY_ROWS.map(([key])=>key));
 const RANK_KEYS=['rank_1_3','rank_4_10','rank_11_20','rank_21_50','rank_51_plus'];
 function monthlyRaw(key,p,siteId,m,O){
  const o=O[key]?.value;if(o!==undefined)return {v:o===''?null:key==='page_optimization'?o:Number(o),ov:true};
  if(key==='rank_total'){const vals=RANK_KEYS.map(k=>monthlyRaw(k,p,siteId,m,O)),any=vals.some(x=>x.v!=null);
   if(any&&(vals.some(x=>x.ov)||p?.rank_total==null))return {v:vals.reduce((a,x)=>a+(x.v||0),0),calc:true};}
  let v=p?.[key];
- if(key==='page_optimization'&&(v==null||v==='')){const c={};state.records.filter(r=>r.site_id===siteId&&r.optimized_on.slice(0,7)===m.slice(0,7)).forEach(r=>c[r.category]=(c[r.category]||0)+1);v=Object.keys(c).length?Object.entries(c).map(([k,n])=>`${k} ${n} 页`).join('；'):null;return {v,auto:v!=null};}
+ if(key==='page_optimization'&&(v==null||v==='')){const c={};state.records.filter(r=>r.site_id===siteId&&r.optimized_on?.slice(0,7)===m.slice(0,7)).forEach(r=>c[r.category]=(c[r.category]||0)+1);v=Object.keys(c).length?Object.entries(c).map(([k,n])=>`${k} ${n} 页`).join('；'):null;return {v,auto:v!=null};}
  return {v:v===''?null:v??null};}
 function monthlyText(key,v){
  if(v==null||v==='')return '';
@@ -367,19 +428,23 @@ function monthlyGrid(){
  if(!ms.includes(month()))ms.push(month());ms.sort();
  const sites=[...state.sites].sort((a,b)=>a.sort_order-b.sort_order);
  const out=[];sites.forEach(s=>{const tool='Semrush';const O={};ms.forEach(m=>O[m]=ovMap('monthly',s.id,m));
-  MONTHLY_ROWS.forEach(([k,cat,label],i)=>{const r={url:i===0?'https://'+s.domain+'/':'',cat:cat||'',label:label.replace('{t}',tool),key:k,site:s.id,cells:{}};
+  MONTHLY_DISPLAY_ROWS.forEach(([k,cat,label],i)=>{const r={url:i===0?'https://'+s.domain+'/':'',cat:cat||'',label:label.replace('{t}',tool),key:k,site:s.id,cells:{}};
    ms.forEach(m=>{const x=monthlyRaw(k,snapshot('monthly',s.id,m)?.payload,s.id,m,O[m]);r.cells[m]=x;r[m]=monthlyText(k,x.v);});out.push(r);});});
  return {ms,out};}
+function departmentGrid(){
+ const {ms,out}=viewWithPending(monthlyGrid);
+ return {ms,out:out.filter(r=>DEPARTMENT_KEYS.has(r.key))};
+}
 function monthly(){
  const {ms,out}=monthlyGrid();const cur=month();
  const head='<tr><th>网址</th><th>调研类目</th><th>工具/工作</th>'+ms.map(m=>`<th class="${m===cur?'current':''}">${esc(m.slice(0,7))}</th>`).join('')+'</tr>';
- const body=out.map((r,i)=>`<tr class="${i%11===0?'group-start':''}"><td>${esc(r.url)}</td><td>${esc(r.cat)}</td><td>${esc(r.label)}</td>`+ms.map(m=>{const x=r.cells[m],type=r.key==='page_optimization'?'text':'mnum';
+ const body=out.map(r=>`<tr class="${r.url?'group-start':''}"><td>${esc(r.url)}</td><td>${esc(r.cat)}</td><td>${esc(r.label)}</td>`+ms.map(m=>{const x=r.cells[m],type=r.key==='page_optimization'?'text':'mnum';
   const tip=x.ov?'手动填写的值；清空后恢复为导入的数据':x.calc?'自动计算：五个排名区间相加（手动填写可覆盖）':x.auto?'按当月优化记录自动汇总（手动填写可覆盖）':'';
   const raw=x.ov?(x.v==null?'-':String(x.v)):'';
   return `<td class="${[m===cur?'current':'',state.admin?'editable':'',x.ov?'ov':'',x.calc||x.auto?'calc':''].filter(Boolean).join(' ')}"${edAttr('ov',{col:'value',type,row:r.key,site:r.site,grid:'monthly',month:m})} data-raw="${esc(x.ov?raw:(x.v==null||x.auto?'':String(x.v)))}"${tip?` title="${esc(tip)}"`:''}>${esc(r[m])}</td>`;}).join('')+'</tr>').join('');
  const missing=out.filter(r=>r[cur]===''&&!['ahrefs_traffic','page_optimization'].includes(r.key)).length;
- return panel('十二站月度汇总',`<div class="topline"><p class="hint">行顺序与部门月度表一致（12 个站 × 11 行 = 132 行）。当月 ${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失，缺失保留为空。${state.admin?'双击数值格填写，可以连续填多格，填完点上方“更新”一次保存；曝光量可以写 1.06w 或 10600。要填新月份，先在上方“月份”里选那个月。':'登录管理员后可双击数值格填写。'}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
- +'<p class="hint">粘贴方法：在部门表格里选中新月份列的第一个数据格（第 2 行），直接粘贴。“Page优化”一行没有手工填写时，按当月优化记录自动汇总。各月关键词总数及排名分布均使用 Semrush；Semrush 流量如为月末快照，以数据来源说明为准。</p>';}
+ return panel('十二站月度汇总',`<div class="topline"><p class="hint">${esc(cur.slice(0,7))} 有 ${missing} 个数值缺失。${state.admin?'双击数值格填写，可连续填写后统一更新。':''}</p><div class="actions"><button id="copy-monthly" class="primary">复制当月数值列（132 行）</button><button id="copy-monthly-full">复制整表（含标签）</button></div></div><div class="table-wrap"><table class="monthly">${head}${body}</table></div>`)
+ +'<p class="hint">复制按钮使用部门表的 132 行格式。AI Overview 和 SERP 精选结果仅在看板显示。</p>';}
 
 // ---------------------------------------------------------------- admin import
 function adminPanel(){return panel('月度数据导入',`<p class="hint">导入由数据处理脚本（pipeline）生成的 import.json。相同站点、月份、页面会更新同一份快照，历史月份保留。处理步骤见仓库 docs/月度数据导入说明.md。</p><div class="actions"><label>选择 import.json<input id="import-file" type="file" accept=".json,application/json"></label></div><p id="import-preview" class="hint"></p><button id="import-confirm" class="primary" disabled>导入数据库</button>`);}
@@ -412,24 +477,62 @@ function render(){
  document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{state.oppCat=b.dataset.cat;render();});
  document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.editing=b.dataset.edit;render();window.scrollTo({top:0,behavior:'smooth'});});
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>deleteRecord(b.dataset.del));
+ document.querySelectorAll('[data-queue]').forEach(b=>b.onclick=()=>addToQueue(b));
  if($('cancel-edit'))$('cancel-edit').onclick=()=>{state.editing=null;render();};
  if($('record-form'))$('record-form').onsubmit=saveRecord;
- if($('copy-monthly'))$('copy-monthly').onclick=()=>copyText(viewWithPending(monthlyGrid).out.map(r=>r[month()].replace(/[\t\r\n]/g,' ')).join('\n'),'已复制当月 132 行数值，到部门表格新月份列第一个数据格粘贴。');
- if($('copy-monthly-full'))$('copy-monthly-full').onclick=()=>{const {ms,out}=viewWithPending(monthlyGrid);copyText([['网址','调研类目','工具/工作',...ms.map(m=>m.slice(0,7))].join('\t'),...out.map(r=>[r.url,r.cat,r.label,...ms.map(m=>r[m])].map(v=>String(v).replace(/[\t\r\n]/g,' ')).join('\t'))].join('\n'),'已复制整表。');};
+ if($('record-batch'))$('record-batch').onsubmit=e=>saveRecord(e,true);
+ if($('copy-monthly'))$('copy-monthly').onclick=()=>copyText(departmentGrid().out.map(r=>r[month()].replace(/[\t\r\n]/g,' ')).join('\n'),'已复制当月 132 行数值，到部门表格新月份列第一个数据格粘贴。');
+ if($('copy-monthly-full'))$('copy-monthly-full').onclick=()=>{const {ms,out}=departmentGrid();copyText([['网址','调研类目','工具/工作',...ms.map(m=>m.slice(0,7))].join('\t'),...out.map(r=>[r.url,r.cat,r.label,...ms.map(m=>r[m])].map(v=>String(v).replace(/[\t\r\n]/g,' ')).join('\t'))].join('\n'),'已复制整表。');};
  if($('import-file'))$('import-file').onchange=previewImport;
 }
 async function copyText(text,ok){try{await navigator.clipboard.writeText(text);message(ok);}catch{message('浏览器未允许复制，请使用导出快照。',true);}}
 async function load(){const id=++state.loadId;state.loading=true;state.error=null;render();try{
  if(window.SEO_OFFLINE){Object.assign(state,window.SEO_OFFLINE);state.admin=false;state.session=null;}
- else {const [sites,snapshots,records,content,keywords,overrides]=await Promise.all([rows('seo_sites','select=*&order=sort_order'),paged('seo_snapshots','select=*&order=month.desc,id'),paged('seo_optimizations','select=*&order=optimized_on.desc,id'),paged('seo_content','select=*&order=site_id,sort_order,id'),paged('seo_keywords','select=*&order=site_id,sort_order,id'),paged('seo_cell_overrides','select=*&order=id')]);if(id!==state.loadId)return;Object.assign(state,{sites,snapshots,records,content,keywords,overrides});}
+ else {const [sites,snapshots,records,content,keywords,overrides,privateNotes,guidance]=await Promise.all([
+  rows('seo_sites','select=*&order=sort_order'),paged('seo_snapshots','select=*&order=month.desc,id'),
+  paged('seo_optimizations','select=*&order=optimized_on.desc.nullslast,id'),paged('seo_content','select=*&order=site_id,sort_order,id'),
+  paged('seo_keywords','select=*&order=site_id,sort_order,id'),paged('seo_cell_overrides','select=*&order=id'),
+  state.admin?paged('seo_snapshot_notes','select=*&order=snapshot_id'):[],
+  state.admin?request('/rest/v1/rpc/seo_dashboard_guidance',{method:'POST',auth:true,body:{}}):{}
+ ]);if(id!==state.loadId)return;
+ Object.assign(state,{sites,snapshots,records,content,keywords,overrides,guidance:guidance||{},
+  notes:Object.fromEntries(privateNotes.map(n=>[n.snapshot_id,n]))});}
  const selected=$('site').value;$('site').innerHTML=state.sites.filter(x=>x.deep_analysis).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');if(state.sites.some(x=>x.id===selected))$('site').value=selected;
  $('connection').textContent=window.SEO_OFFLINE?'离线快照':'数据库已连接';
  }catch(e){state.error=e.message;$('connection').textContent='连接失败';}finally{if(id===state.loadId){state.loading=false;render();}}}
-async function saveRecord(event){event.preventDefault();const f=event.currentTarget,b=f.querySelector('button[type=submit]');b.disabled=true;try{const data=Object.fromEntries(new FormData(f));const u=new URL(data.page_url);if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==site().domain.replace(/^www\./,''))throw Error('页面网址必须属于当前站点，并使用 https。');
- const body={site_id:$('site').value,page_url:u.href,optimized_on:data.optimized_on,category:data.category,description:data.description.trim(),published:!!data.published};
- if(state.editing)await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(state.editing),{method:'PATCH',auth:true,body});
- else await request('/rest/v1/seo_optimizations',{method:'POST',auth:true,body});
- message(state.editing?'优化记录已修改。':'优化记录已保存。');state.editing=null;await load();}catch(e){message(e.message,true);b.disabled=false;}}
+function recordUrl(raw,s){
+ const invalid=()=>Error(`页面网址必须属于 ${s.domain}，并使用 https。`);
+ let u;try{u=new URL(raw);}catch{throw invalid();}
+ if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,'')||u.username||u.password||u.port)throw invalid();
+ return 'https://'+s.domain+keyPath(u);
+}
+async function saveRecord(event,batch=false){
+ event.preventDefault();const f=event.currentTarget,b=f.querySelector('button[type=submit]'),s=site(),id=batch?null:state.editing;
+ b.disabled=true;
+ try{
+  const data=Object.fromEntries(new FormData(f));
+  const lines=batch?data.page_urls.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):[data.page_url];
+  if(!lines.length)throw Error('请填写至少一个页面网址。');
+  if(!data.optimized_on||data.optimized_on>today()||!OPT_CATEGORIES.includes(data.category))throw Error('请填写有效的优化日期和类型。');
+  const urls=[...new Set(lines.map((line,i)=>{try{return recordUrl(line,s);}catch(e){throw Error(batch?`第 ${i+1} 个网址：${e.message}`:e.message);}}))];
+  const body=urls.map(page_url=>({site_id:s.id,page_url,optimized_on:data.optimized_on,category:data.category,description:data.description.trim(),published:!!data.published}));
+  if(id)await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'PATCH',auth:true,body:body[0]});
+  else await request('/rest/v1/seo_optimizations',{method:'POST',auth:true,body:batch?body:body[0]});
+  message(id?'优化记录已更新。':`已保存 ${body.length} 条优化记录。`);state.editing=null;await load();
+ }catch(e){message(e.message,true);b.disabled=false;if(!state.admin)render();}
+}
+async function addToQueue(button){
+ const s=site();button.disabled=true;
+ try{
+  const page_url=recordUrl(button.dataset.queue,s);
+  const [row]=await request('/rest/v1/seo_optimizations',{method:'POST',auth:true,
+   body:{site_id:s.id,page_url,published:false},prefer:'return=representation'});
+  state.records.push(row);message('已加入优化清单，可在“优化记录”补充信息。');render();
+ }catch(e){
+  if(e.code==='23505'){message('该页面已在优化清单。');await load();}
+  else {message(e.message,true);button.disabled=false;if(!state.admin)render();}
+ }
+}
 async function deleteRecord(id){const r=state.records.find(x=>x.id===id);if(!r||!confirm(`删除这条优化记录？\n${r.optimized_on} ${r.page_url}`))return;try{await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'DELETE',auth:true});message('已删除。');await load();}catch(e){message(e.message,true);}}
 async function deleteRow(table,id){const list=table==='seo_content'?state.content:state.keywords,r=list.find(x=>String(x.id)===String(id));if(!r||!confirm(`删除这一行？\n${r.keyword||r.url}`))return;
  try{await request(`/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,{method:'DELETE',auth:true});list.splice(list.indexOf(r),1);[...pending.entries()].forEach(([k,v])=>{if(v.ds.id===String(id)&&v.ds.ed===(table==='seo_content'?'content':'keyword'))pending.delete(k);});message('已删除。');render();}catch(e){message(e.message,true);}}
@@ -447,8 +550,17 @@ async function previewImport(){pendingImport=null;$('import-confirm').disabled=t
  pendingImport=data.snapshots;const months=[...new Set(pendingImport.map(x=>x.month.slice(0,7)))].join('、');$('import-preview').textContent=`待导入 ${pendingImport.length} 份快照（${months}），其中 ${pendingImport.filter(x=>x.published).length} 份将公开；同名快照将更新。`;$('import-confirm').disabled=false;$('import-confirm').onclick=commitImport;}catch(e){$('import-preview').textContent=e.message;}}
 async function commitImport(){if(!pendingImport)return;$('import-confirm').disabled=true;try{for(let i=0;i<pendingImport.length;i+=50)await request('/rest/v1/rpc/seo_import_snapshots',{method:'POST',auth:true,body:{items:pendingImport.slice(i,i+50)}});pendingImport=null;message('数据导入成功。');await load();}catch(e){message(e.message,true);if($('import-confirm'))$('import-confirm').disabled=false;}}
 function download(name,content,type){const a=document.createElement('a'),u=URL.createObjectURL(new Blob([content],{type}));a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}
+function publicSnapshots(){
+ return state.snapshots.filter(s=>s.published).map(s=>{
+  const {checks,...payload}=s.payload;
+  const {ga4_landing_date_range,gsc_full_month}=s.provenance||{};
+  if(s.section==='opportunities'&&payload.rows)payload.rows=payload.rows.map(({action,...row})=>row);
+  if(s.section==='overview'&&payload.ga4?.channels)payload.ga4={...payload.ga4,channels:payload.ga4.channels.map(({note,...row})=>row)};
+  return {...s,payload,provenance:{ga4_landing_date_range,gsc_full_month}};
+ });
+}
 $('site').onchange=()=>{message('');state.editing=null;render();};$('month').onchange=render;$('search').oninput=render;$('refresh').onclick=()=>{message('');load();};
-$('login-toggle').onclick=()=>{if(state.session){state.session=null;state.admin=false;message('已退出管理员。');load();}else $('login-dialog').showModal();};$('cancel-login').onclick=()=>$('login-dialog').close();
+$('login-toggle').onclick=()=>{if(state.session){state.session=null;state.admin=false;state.notes={};state.guidance={};message('已退出管理员。');load();}else $('login-dialog').showModal();};$('cancel-login').onclick=()=>$('login-dialog').close();
 $('login-form').onsubmit=async e=>{e.preventDefault();const b=e.currentTarget.querySelector('button[type=submit]');b.disabled=true;$('login-message').textContent='登录中…';try{state.session=await request('/auth/v1/token?grant_type=password',{method:'POST',body:{email:$('email').value,password:$('password').value}});state.admin=await request('/rest/v1/rpc/seo_is_admin',{method:'POST',auth:true,body:{}});$('password').value='';if(!state.admin){state.session=null;throw Error('该账号没有此看板的管理权限。');}$('login-dialog').close();message('已进入管理员模式，登录仅在本次页面会话保留。');await load();}catch(e){state.session=null;state.admin=false;$('login-message').textContent=e.message;}finally{b.disabled=false;}};
-$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:state.snapshots.filter(x=>x.published),records:state.records.filter(x=>x.published),content:state.content,keywords:state.keywords,overrides:state.overrides};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
+$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:publicSnapshots(),records:state.records.filter(x=>x.published),content:state.content,keywords:state.keywords,overrides:state.overrides};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
 load();
