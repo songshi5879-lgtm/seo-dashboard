@@ -19,3 +19,14 @@ table.monthly td.ov{background:#fff6dc}table.monthly td.calc{font-style:italic;c
 .edit-bar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 16px;padding:10px 16px;border:1px solid #d7e5e1;border-radius:12px;background:#f7fbfa;font-size:13px;color:#4c6773}
 .edit-bar.dirty{background:#eaf3ff;border-color:#b9d3f3;color:#1f4f86;box-shadow:0 2px 8px rgba(31,79,134,.08)}.edit-bar .actions{display:flex;gap:8px}
 td.pending,td.pending:hover,table.monthly td.pending{background:#e3efff;box-shadow:inset 0 0 0 1px #9cc0ec}
+.record-draft{margin-bottom:12px;padding:16px;border:1px solid var(--line);border-radius:9px;background:#f8fafc}
+.record-draft-heading,.record-draft-footer{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.record-draft-heading h3{margin:0}
+.record-draft-fields{grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);margin-top:12px}
+.record-draft-fields .inline{grid-column:1/-1;order:1}
+.record-draft-fields textarea{min-height:60px}
+#new-record-form fieldset{min-width:0;margin:0;padding:0;border:0}
+#add-record-draft{width:100%;border-style:dashed;border-color:#aac9c6;color:var(--accent);background:#f7fcfb;font-weight:600}
+#add-record-draft:not(:disabled):hover{background:#eaf6f4}
+.record-draft-footer{margin-top:16px;font-size:13px}
+@media(max-width:900px){.record-draft-fields{grid-template-columns:1fr}}

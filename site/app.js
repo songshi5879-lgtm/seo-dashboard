@@ -343,6 +343,9 @@ const isNumT=t=>['int','num2','money','dur','pct','share','diff'].includes(t);
 
 // ---------------------------------------------------------------- optimizations
 const OPT_CATEGORIES=['Title/Meta','内容','内链','技术','其他'];
+const MAX_NEW_RECORDS=10;
+const recordDrafts=new Map();
+const savingRecordSites=new Set();
 function completePages(s){
  const days=snapshot('overview',s.site_id,s.month)?.payload?.gsc?.days;
  return s.provenance?.gsc_full_month??(days==null||days===daysIn(s.month));
@@ -382,11 +385,45 @@ function cmpCell(record,records,snapshots){
  return `<div class="cmp"><strong>${esc(before.slice(0,7))} → ${after?esc(after.slice(0,7)):'—'}</strong><br>${line('点击','gsc_clicks')}<br>${line('曝光','gsc_impressions')}<br>${line('排名','gsc_position',1)}<br>${line('自然会话','ga_sessions')}<br>${line('订单','ga_purchases')}<br>${query('曝光量最高的 query','top_query_impressions')}<br>${query('点击次数最多的 query','top_query_clicks')}${statuses.map(s=>`<br><span class="muted">${esc(s)}</span>`).join('')}</div>`;
 }
 function recordFields(record){
- const date=record?(record.optimized_on||''):today();
+ const date=record?.optimized_on||'';
  return `<label>优化日期<input name="optimized_on" type="date" max="${today()}" required value="${esc(date)}"></label>
  <label>优化类型<select name="category" required><option value="">请选择</option>${OPT_CATEGORIES.map(x=>`<option ${record?.category===x?'selected':''}>${x}</option>`).join('')}</select></label>
  <label class="inline"><input name="published" type="checkbox" ${!record||record.published?'checked':''}>公开显示此记录</label>
  <label class="wide">优化内容（选填）<textarea name="description" maxlength="5000">${esc(record?.description||'')}</textarea></label>`;
+}
+function recordUrlField(record,readonly=false){
+ return `<label>页面网址<input name="page_url" type="url" placeholder="https://${esc(site()?.domain)}/…" required value="${esc(record.page_url||'')}" ${readonly?'readonly':''}></label>`;
+}
+function newRecordForm(sid){
+ const drafts=recordDrafts.get(sid)||[],full=drafts.length>=MAX_NEW_RECORDS;
+ const cards=drafts.map((draft,index)=>`<section class="record-draft" data-record-draft="${index}">
+  <div class="record-draft-heading"><h3>记录 ${index+1}</h3><button type="button" class="link danger" data-remove-draft="${index}" aria-label="移除记录 ${index+1}">移除</button></div>
+  <div class="record-form record-draft-fields">${recordUrlField(draft)}${recordFields(draft)}</div>
+ </section>`).join('');
+ return `<form id="new-record-form"><fieldset ${savingRecordSites.has(sid)?'disabled':''}>
+  ${cards}<button type="button" id="add-record-draft" ${full?'disabled':''}>${full?'已添加 10 条':'＋ 新增一条'}</button>
+  <div class="record-draft-footer"><button type="submit" class="primary" ${drafts.length?'':'disabled'}>保存记录</button><span class="muted">${drafts.length} / ${MAX_NEW_RECORDS} 条</span></div>
+ </fieldset></form>`;
+}
+function bindNewRecordForm(form,sid){
+ form.oninput=event=>{
+  const field=event.target,card=field.closest('[data-record-draft]');
+  if(card&&field.name)recordDrafts.get(sid)[Number(card.dataset.recordDraft)][field.name]=field.type==='checkbox'?field.checked:field.value;
+ };
+ $('add-record-draft').onclick=()=>{
+  const drafts=recordDrafts.get(sid)||[];
+  if(drafts.length>=MAX_NEW_RECORDS||savingRecordSites.has(sid))return;
+  drafts.push({id:crypto.randomUUID(),published:true});
+  recordDrafts.set(sid,drafts);
+  render();
+  $('new-record-form').querySelector('[data-record-draft]:last-of-type input').focus();
+ };
+ form.querySelectorAll('[data-remove-draft]').forEach(button=>button.onclick=()=>{
+  recordDrafts.get(sid).splice(Number(button.dataset.removeDraft),1);
+  render();
+  $('add-record-draft').focus();
+ });
+ form.onsubmit=saveNewRecords;
 }
 function optimizations(){
  let html='';
@@ -394,8 +431,7 @@ function optimizations(){
  const completed=all.filter(r=>r.optimized_on),snapshots=state.snapshots.filter(s=>s.site_id===sid&&s.section==='pages'&&completePages(s));
  const actions=(r,label)=>`<button class="link" data-edit="${esc(r.id)}">${label}</button> <button class="link danger" data-del="${esc(r.id)}">删除</button>`;
  if(state.admin){
-  html+=panel(e?(e.optimized_on?'修改优化记录':'补充优化记录'):'新增优化记录',`<form id="record-form" class="record-form"><label>页面网址<input name="page_url" type="url" placeholder="https://${esc(site()?.domain)}/…" required value="${esc(e?.page_url||'')}" ${e&&!e.optimized_on?'readonly':''}></label>${recordFields(e)}<div class="wide actions"><button class="primary" type="submit">保存记录</button>${e?'<button type="button" id="cancel-edit">取消修改</button>':''}</div></form>`);
-  html+=panel('批量新增优化记录',`<details><summary>批量录入</summary><form id="record-batch" class="record-form"><label class="wide">页面网址（每行一个，共用下方日期和类型）<textarea name="page_urls" rows="5" required></textarea></label>${recordFields()}<div class="wide actions"><button class="primary" type="submit">批量保存</button></div></form></details>`);
+  html+=e?panel(e.optimized_on?'修改优化记录':'补充优化记录',`<form id="record-form" class="record-form">${recordUrlField(e,!e.optimized_on)}${recordFields(e)}<div class="wide actions"><button class="primary" type="submit">保存记录</button><button type="button" id="cancel-edit">取消修改</button></div></form>`):panel('新增优化记录',newRecordForm(sid));
   const queue=filtered(all.filter(r=>!r.optimized_on)).map(r=>({...r,ops:actions(r,'补充记录')}));
   html+=panel('优化清单',table([['page_url','页面','url'],['ops','操作','html']],queue,{emptyTitle:'暂无待补充的页面',emptyDetail:'可从机会清单加入页面。'}));
  }
@@ -480,7 +516,7 @@ function render(){
  document.querySelectorAll('[data-queue]').forEach(b=>b.onclick=()=>addToQueue(b));
  if($('cancel-edit'))$('cancel-edit').onclick=()=>{state.editing=null;render();};
  if($('record-form'))$('record-form').onsubmit=saveRecord;
- if($('record-batch'))$('record-batch').onsubmit=e=>saveRecord(e,true);
+ if($('new-record-form'))bindNewRecordForm($('new-record-form'),$('site').value);
  if($('copy-monthly'))$('copy-monthly').onclick=()=>copyText(departmentGrid().out.map(r=>r[month()].replace(/[\t\r\n]/g,' ')).join('\n'),'已复制当月 132 行数值，到部门表格新月份列第一个数据格粘贴。');
  if($('copy-monthly-full'))$('copy-monthly-full').onclick=()=>{const {ms,out}=departmentGrid();copyText([['网址','调研类目','工具/工作',...ms.map(m=>m.slice(0,7))].join('\t'),...out.map(r=>[r.url,r.cat,r.label,...ms.map(m=>r[m])].map(v=>String(v).replace(/[\t\r\n]/g,' ')).join('\t'))].join('\n'),'已复制整表。');};
  if($('import-file'))$('import-file').onchange=previewImport;
@@ -506,20 +542,43 @@ function recordUrl(raw,s){
  if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,'')||u.username||u.password||u.port)throw invalid();
  return 'https://'+s.domain+keyPath(u);
 }
-async function saveRecord(event,batch=false){
- event.preventDefault();const f=event.currentTarget,b=f.querySelector('button[type=submit]'),s=site(),id=batch?null:state.editing;
+function recordPayload(data,s){
+ if(!data.optimized_on||data.optimized_on>today()||!OPT_CATEGORIES.includes(data.category))throw Error('请填写有效的优化日期和类型。');
+ return {site_id:s.id,page_url:recordUrl(data.page_url,s),optimized_on:data.optimized_on,
+  category:data.category,description:(data.description||'').trim(),published:!!data.published};
+}
+async function saveRecord(event){
+ event.preventDefault();const f=event.currentTarget,b=f.querySelector('button[type=submit]'),s=site(),id=state.editing;
  b.disabled=true;
  try{
-  const data=Object.fromEntries(new FormData(f));
-  const lines=batch?data.page_urls.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):[data.page_url];
-  if(!lines.length)throw Error('请填写至少一个页面网址。');
-  if(!data.optimized_on||data.optimized_on>today()||!OPT_CATEGORIES.includes(data.category))throw Error('请填写有效的优化日期和类型。');
-  const urls=[...new Set(lines.map((line,i)=>{try{return recordUrl(line,s);}catch(e){throw Error(batch?`第 ${i+1} 个网址：${e.message}`:e.message);}}))];
-  const body=urls.map(page_url=>({site_id:s.id,page_url,optimized_on:data.optimized_on,category:data.category,description:data.description.trim(),published:!!data.published}));
-  if(id)await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'PATCH',auth:true,body:body[0]});
-  else await request('/rest/v1/seo_optimizations',{method:'POST',auth:true,body:batch?body:body[0]});
-  message(id?'优化记录已更新。':`已保存 ${body.length} 条优化记录。`);state.editing=null;await load();
+  const body=recordPayload(Object.fromEntries(new FormData(f)),s);
+  await request('/rest/v1/seo_optimizations?id=eq.'+encodeURIComponent(id),{method:'PATCH',auth:true,body});
+  message('优化记录已更新。');state.editing=null;await load();
  }catch(e){message(e.message,true);b.disabled=false;if(!state.admin)render();}
+}
+async function saveNewRecords(event){
+ event.preventDefault();
+ const s=site(),drafts=recordDrafts.get(s.id);
+ if(!drafts?.length||savingRecordSites.has(s.id))return;
+ const fieldset=event.currentTarget.querySelector('fieldset');
+ try{
+  const body=drafts.map((draft,index)=>{
+   try{return {...recordPayload(draft,s),id:draft.id};}
+   catch(error){throw Error(`第 ${index+1} 条记录：${error.message}`);}
+  });
+  savingRecordSites.add(s.id);
+  fieldset.disabled=true;
+  await request('/rest/v1/seo_optimizations?on_conflict=id',{method:'POST',auth:true,body,prefer:'resolution=ignore-duplicates'});
+  recordDrafts.delete(s.id);
+  message(`已保存 ${body.length} 条优化记录。`);
+ }catch(error){
+  message(error.message,true);
+  savingRecordSites.delete(s.id);
+  render();
+  return;
+ }
+ savingRecordSites.delete(s.id);
+ await load();
 }
 async function addToQueue(button){
  const s=site();button.disabled=true;
