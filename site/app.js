@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const pages={overview:'总览',opportunities:'机会清单',keywords:'关键词监控',content:'内容追踪',optimizations:'优化记录',monthly:'月度数据表',blog:'博客数据总结表'};
-const state={page:'overview',sites:[],snapshots:[],records:[],content:[],keywords:[],overrides:[],notes:{},guidance:{},session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
+const state={page:'overview',sites:[],snapshots:[],records:[],content:[],keywords:[],overrides:[],ignored:[],notes:{},guidance:{},session:null,admin:false,loading:true,error:null,loadId:0,oppCat:'',editing:null};
 const SECTIONS=['overview','opportunities','keywords','content','monthly','pages','blog_summary'];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=0)=>v==null||Number.isNaN(+v)?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:d});
@@ -47,6 +47,35 @@ function filtered(data){const q=$('search').value.toLowerCase().trim();return q?
 function source(s){const notes=state.admin&&state.notes[s?.id];return notes?`<details class="hint"><summary>数据来源与口径${s.published?'':' · 草稿'}</summary><pre class="mono">${esc(JSON.stringify(notes.provenance,null,2))}</pre></details>`:'';}
 function card(label,value,subtitle){return `<div class="card"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="hint">${subtitle}</div></div>`;}
 function mom(now,prev,m,{daily=true,invert=false}={}){const c=change(now,prev);if(c==null)return '环比 —';let s='环比 '+changeHtml(c,invert);if(daily&&now!=null&&prev){const d=(now/daysIn(m))/(prev/daysIn(shiftMonth(m,-1)))-1;s+='，日均 '+changeHtml(d,invert);}return s;}
+function blogOverview(sid,m){
+ const data=snapshot('pages',sid,m)?.payload?.blog_overview||{};
+ const previous=snapshot('pages',sid,shiftMonth(m,-1))?.payload?.blog_overview||{};
+ const g=data.gsc||{},a=data.ga4||{},n=a.organic||{};
+ const pg=g.full_month&&!g.limited&&previous.gsc?.full_month&&!previous.gsc.limited?previous.gsc:{};
+ const pa=a.full_month&&previous.ga4?.full_month?previous.ga4:{};
+ const pn=pa.organic||{};
+ const money=v=>v==null?'—':'US$'+fmt(v);
+ const seconds=v=>v==null?'—':fmt(v)+' 秒';
+ const channelCard=(label,key)=>{
+  const row=a[key]||{};
+  return card(label,row.sessions==null?'—':fmt(row.sessions)+' <small>会话</small>',
+   `订单 ${fmt(row.purchases)}，收入 ${money(row.revenue)}，${mom(row.sessions,pa[key]?.sessions,m,{daily:false})}`);
+ };
+ const gscNote=g.limited?'（按导出网页明细汇总）':data.gsc&&!g.full_month?'（导出未覆盖整月）':'';
+ const gaNote=data.ga4&&!a.full_month?`<p class="hint">${esc(a.date_range?`GA4 着陆页数据覆盖 ${a.date_range}`:'GA4 着陆页数据日期范围未确认')}。</p>`:'';
+ return `<section class="blog-overview"><h2>博客自然渠道</h2>
+  <h3 class="section-title">Google Search Console${gscNote}</h3><div class="cards">
+  ${card('GSC 点击',fmt(g.clicks),mom(g.clicks,pg.clicks,m))}${card('GSC 曝光',fmt(g.impressions),mom(g.impressions,pg.impressions,m))}
+  ${card('点击率',percent(g.ctr),'上月 '+percent(pg.ctr))}${card('平均排名',fmt(g.position,1),'上月 '+fmt(pg.position,1))}</div>
+  <h3 class="section-title">GA4 自然流量（自然搜索、自然购物、自然社交、自然视频、AI 助手合计）</h3>${gaNote}<div class="cards">
+  ${card('自然会话',fmt(n.sessions),mom(n.sessions,pn.sessions,m))}
+  ${card('订单',fmt(n.purchases),mom(n.purchases,pn.purchases,m,{daily:false}))}
+  ${card('收入',money(n.revenue),mom(n.revenue,pn.revenue,m,{daily:false}))}
+  ${card('转化率（订单 ÷ 会话）',percent(n.conversion),'上月 '+percent(pn.conversion))}</div>
+  <div class="cards">${channelCard('其中 Google 自然搜索','google_organic')}${channelCard('其中 AI 助手','ai')}
+  ${card('平均停留时长',seconds(a.avg_engagement),'上月 '+seconds(pa.avg_engagement))}
+  ${card('跳出率',percent(a.bounce_rate),'上月 '+percent(pa.bounce_rate))}</div></section>`;
+}
 
 // ---------------------------------------------------------------- overview
 function overview(){
@@ -64,6 +93,7 @@ function overview(){
  ${card('其中 AI 助手',fmt(ai.sessions)+' <small>会话</small>',`订单 ${fmt(ai.purchases)}，收入 $${fmt(ai.revenue,0)}；${mom(ai.sessions,pai.sessions,m,{daily:false})}`)}
  ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions!=null?fmt(go.sessions/g.clicks,2):'—',state.admin?esc(state.guidance.session_ratio):'')}
  ${state.admin?card('数据提醒',String((state.notes[s.id]?.checks||[]).length),(state.notes[s.id]?.checks||[]).map(esc).join('<br>')||'无'):''}</div>`;
+ html+=blogOverview($('site').value,m);
  html+=panel('月度趋势',trendTable());
  html+=panel('自然渠道汇总',table([['channel','渠道'],['sessions','会话'],['purchases','订单'],['revenue','收入','money'],['conversion','转化率','pct']],p.ga4?.by_channel||[]));
  const channels=(p.ga4?.channels||[]).map(({note,...row},i)=>state.admin?{...row,note:state.notes[s.id]?.channel_notes[i]}:row);
@@ -85,22 +115,36 @@ function trendTable(){
 
 // ---------------------------------------------------------------- opportunities
 const OPP_GROUPS=['核心页面','下滑页面','同产品合计','排名11–20（产品/集合页）','排名11–20（博客）','排名11–20（其他）','点击率偏低','错位：实际页面≠规划页面','机会词：未规划承接页','互动差','流量高、转化低','流量低、转化高','未收录','新文章无曝光','广告有转化、自然排名弱'];
+const IGNORED_OPPORTUNITIES='已忽略';
 function opportunities(){
- const s=snapshot('opportunities');const all=s?.payload?.rows||[];
- const counts={};all.forEach(r=>counts[r.category]=(counts[r.category]||0)+1);
+ const s=snapshot('opportunities'),sid=$('site').value;
+ const ignored=new Map(state.ignored.filter(r=>r.site_id===sid).map(r=>[r.page_key,r]));
+ const all=(s?.payload?.rows||[]).map(({action,...r},i)=>{
+  const match=r.page_url&&ignored.get(keyPath(r.page_url));
+  const row=match?{...r,category:IGNORED_OPPORTUNITIES,reason:state.admin?match.reason:undefined}:r;
+  return state.admin?{...row,action:state.notes[s.id]?.actions[i]}:row;
+ });
+ const counts={[IGNORED_OPPORTUNITIES]:0};all.forEach(r=>counts[r.category]=(counts[r.category]||0)+1);
  const cats=[...OPP_GROUPS.filter(c=>counts[c]),...Object.keys(counts).filter(c=>!OPP_GROUPS.includes(c))];
- const chips=`<div class="chips"><button class="chip ${state.oppCat?'':'active'}" data-cat="">全部 ${all.length}</button>${cats.map(c=>`<button class="chip ${state.oppCat===c?'active':''}" data-cat="${esc(c)}">${esc(c)} ${counts[c]}</button>`).join('')}</div>`;
- const queued=new Set(state.records.filter(r=>r.site_id===site()?.id&&!r.optimized_on).map(r=>keyPath(r.page_url)));
- const data=filtered(all.map(({action,...r},i)=>state.admin?{...r,action:state.notes[s.id]?.actions[i]}:r)
-  .filter(r=>!state.oppCat||r.category===state.oppCat)).map(r=>{
+ const cat=cats.includes(state.oppCat)?state.oppCat:'';
+ const showIgnored=cat===IGNORED_OPPORTUNITIES;
+ const chips=`<div class="chips"><button class="chip ${cat?'':'active'}" data-cat="">全部 ${all.length-counts[IGNORED_OPPORTUNITIES]}</button>${cats.map(c=>`<button class="chip ${cat===c?'active':''}" data-cat="${esc(c)}">${esc(c)} ${counts[c]}</button>`).join('')}</div>`;
+ const queued=new Set(state.records.filter(r=>r.site_id===sid&&!r.optimized_on).map(r=>keyPath(r.page_url)));
+ const data=filtered(all.filter(r=>cat?r.category===cat:r.category!==IGNORED_OPPORTUNITIES)).map(r=>{
    if(!state.admin)return r;
+   if(showIgnored)return {...r,queue:`<button class="link nw" data-restore-ignore="${esc(r.page_url)}">恢复</button>`};
    const added=r.page_url&&queued.has(keyPath(r.page_url));
-   return {...r,queue:`<button class="link nw" data-queue="${esc(r.page_url)}" ${added||!r.page_url?'disabled':''} ${!r.page_url?'title="该机会暂无页面网址"':''}>${added?'已加入':'加入优化清单'}</button>`};
+   return {...r,queue:`<div class="opportunity-actions"><button class="link nw" data-queue="${esc(r.page_url)}" ${added||!r.page_url?'disabled':''} ${!r.page_url?'title="该机会暂无页面网址"':''}>${added?'已加入':'加入优化清单'}</button>
+   ${r.page_url?`<button class="link muted" data-ignore-page="${esc(r.page_url)}">忽略</button>`:''}</div>`};
   });
  const columns=[['priority','优先级','prio'],['category','类型'],['page_url','页面','url'],['query','查询词'],['impressions','曝光'],['clicks','点击'],['ctr','点击率','pct'],['position','排名','pos'],['sessions','自然会话'],['purchases','订单'],['evidence','判断依据']];
- if(state.admin)columns.push(['action','建议动作'],['queue','优化清单','html']);
+ if(state.admin)columns.push(showIgnored?['reason','忽略原因']:['action','建议动作'],['queue','操作','html']);
+ const dialog=state.admin?`<dialog id="ignore-dialog"><form id="ignore-form"><h2>忽略页面</h2><p id="ignore-page"></p>
+  <label>忽略原因<textarea name="reason" maxlength="500" required></textarea></label>
+  <p id="ignore-error" role="alert"></p>
+  <div class="actions"><button type="submit" class="primary">确认忽略</button><button type="button" id="cancel-ignore">取消</button></div></form></dialog>`:'';
  const rules=state.admin&&(state.guidance.opportunities||[]);
- return panel('待处理机会',chips+table(columns,data))
+ return panel('待处理机会',chips+table(columns,data,showIgnored?{emptyTitle:'本月暂无已忽略的机会',emptyDetail:''}:{}))+dialog
   +(rules?.length?panel('判断口径',`<ul class="rule-list">${rules.map(r=>`<li>${esc(r)}</li>`).join('')}</ul>`):'')+source(s);}
 
 // ---------------------------------------------------------------- editable cells (shared)
@@ -514,6 +558,7 @@ function render(){
  document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{state.editing=b.dataset.edit;render();window.scrollTo({top:0,behavior:'smooth'});});
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>deleteRecord(b.dataset.del));
  document.querySelectorAll('[data-queue]').forEach(b=>b.onclick=()=>addToQueue(b));
+ if($('ignore-form'))bindOpportunityIgnores();
  if($('cancel-edit'))$('cancel-edit').onclick=()=>{state.editing=null;render();};
  if($('record-form'))$('record-form').onsubmit=saveRecord;
  if($('new-record-form'))bindNewRecordForm($('new-record-form'),$('site').value);
@@ -524,14 +569,15 @@ function render(){
 async function copyText(text,ok){try{await navigator.clipboard.writeText(text);message(ok);}catch{message('浏览器未允许复制，请使用导出快照。',true);}}
 async function load(){const id=++state.loadId;state.loading=true;state.error=null;render();try{
  if(window.SEO_OFFLINE){Object.assign(state,window.SEO_OFFLINE);state.admin=false;state.session=null;}
- else {const [sites,snapshots,records,content,keywords,overrides,privateNotes,guidance]=await Promise.all([
+ else {const [sites,snapshots,records,content,keywords,overrides,privateNotes,guidance,ignored]=await Promise.all([
   rows('seo_sites','select=*&order=sort_order'),paged('seo_snapshots','select=*&order=month.desc,id'),
   paged('seo_optimizations','select=*&order=optimized_on.desc.nullslast,id'),paged('seo_content','select=*&order=site_id,sort_order,id'),
   paged('seo_keywords','select=*&order=site_id,sort_order,id'),paged('seo_cell_overrides','select=*&order=id'),
   state.admin?paged('seo_snapshot_notes','select=*&order=snapshot_id'):[],
-  state.admin?request('/rest/v1/rpc/seo_dashboard_guidance',{method:'POST',auth:true,body:{}}):{}
+  state.admin?request('/rest/v1/rpc/seo_dashboard_guidance',{method:'POST',auth:true,body:{}}):{},
+  paged(state.admin?'seo_opportunity_ignores':'seo_opportunity_ignore_status','select=*&order=site_id,page_key')
  ]);if(id!==state.loadId)return;
- Object.assign(state,{sites,snapshots,records,content,keywords,overrides,guidance:guidance||{},
+ Object.assign(state,{sites,snapshots,records,content,keywords,overrides,ignored,guidance:guidance||{},
   notes:Object.fromEntries(privateNotes.map(n=>[n.snapshot_id,n]))});}
  const selected=$('site').value;$('site').innerHTML=state.sites.filter(x=>x.deep_analysis).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');if(state.sites.some(x=>x.id===selected))$('site').value=selected;
  $('connection').textContent=window.SEO_OFFLINE?'离线快照':'数据库已连接';
@@ -541,6 +587,49 @@ function recordUrl(raw,s){
  let u;try{u=new URL(raw);}catch{throw invalid();}
  if(u.protocol!=='https:'||u.hostname.replace(/^www\./,'')!==s.domain.replace(/^www\./,'')||u.username||u.password||u.port)throw invalid();
  return 'https://'+s.domain+keyPath(u);
+}
+function bindOpportunityIgnores(){
+ const dialog=$('ignore-dialog'),form=$('ignore-form');
+ const reason=form.elements.reason,submit=form.querySelector('[type=submit]');
+ document.querySelectorAll('[data-ignore-page]').forEach(button=>button.onclick=()=>{
+  form.reset();
+  reason.setCustomValidity('');
+  $('ignore-error').textContent='';
+  form.dataset.pageUrl=button.dataset.ignorePage;
+  $('ignore-page').textContent=button.dataset.ignorePage;
+  dialog.showModal();
+ });
+ $('cancel-ignore').onclick=()=>{if(!submit.disabled)dialog.close();};
+ dialog.oncancel=event=>{if(submit.disabled)event.preventDefault();};
+ reason.oninput=()=>reason.setCustomValidity('');
+ form.onsubmit=async event=>{
+  event.preventDefault();
+  const value=reason.value.trim();
+  if(!value){reason.setCustomValidity('请填写忽略原因。');reason.reportValidity();return;}
+  submit.disabled=true;
+  try{
+   const s=site(),page_key=keyPath(recordUrl(form.dataset.pageUrl,s));
+   await request('/rest/v1/seo_opportunity_ignores?on_conflict=site_id,page_key',{
+    method:'POST',auth:true,body:{site_id:s.id,page_key,reason:value},prefer:'resolution=ignore-duplicates'
+   });
+   dialog.close();
+   message('已移至「已忽略」。');
+   await load();
+  }catch(error){
+   if(state.admin)$('ignore-error').textContent=error.message;
+   else {message(error.message,true);render();}
+  }
+  finally{submit.disabled=false;}
+ };
+ document.querySelectorAll('[data-restore-ignore]').forEach(button=>button.onclick=async()=>{
+  const sid=$('site').value,page_key=keyPath(button.dataset.restoreIgnore);
+  button.disabled=true;
+  try{
+   await request('/rest/v1/seo_opportunity_ignores?site_id=eq.'+encodeURIComponent(sid)+'&page_key=eq.'+encodeURIComponent(page_key),{method:'DELETE',auth:true});
+   message('已恢复到原分类。');
+   await load();
+  }catch(error){message(error.message,true);button.disabled=false;if(!state.admin)render();}
+ });
 }
 function recordPayload(data,s){
  if(!data.optimized_on||data.optimized_on>today()||!OPT_CATEGORIES.includes(data.category))throw Error('请填写有效的优化日期和类型。');
@@ -621,5 +710,5 @@ function publicSnapshots(){
 $('site').onchange=()=>{message('');state.editing=null;render();};$('month').onchange=render;$('search').oninput=render;$('refresh').onclick=()=>{message('');load();};
 $('login-toggle').onclick=()=>{if(state.session){state.session=null;state.admin=false;state.notes={};state.guidance={};message('已退出管理员。');load();}else $('login-dialog').showModal();};$('cancel-login').onclick=()=>$('login-dialog').close();
 $('login-form').onsubmit=async e=>{e.preventDefault();const b=e.currentTarget.querySelector('button[type=submit]');b.disabled=true;$('login-message').textContent='登录中…';try{state.session=await request('/auth/v1/token?grant_type=password',{method:'POST',body:{email:$('email').value,password:$('password').value}});state.admin=await request('/rest/v1/rpc/seo_is_admin',{method:'POST',auth:true,body:{}});$('password').value='';if(!state.admin){state.session=null;throw Error('该账号没有此看板的管理权限。');}$('login-dialog').close();message('已进入管理员模式，登录仅在本次页面会话保留。');await load();}catch(e){state.session=null;state.admin=false;$('login-message').textContent=e.message;}finally{b.disabled=false;}};
-$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:publicSnapshots(),records:state.records.filter(x=>x.published),content:state.content,keywords:state.keywords,overrides:state.overrides};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
+$('export').onclick=async()=>{try{if(state.error||state.loading)throw Error('数据未就绪，暂时无法导出。');const data={sites:state.sites,snapshots:publicSnapshots(),records:state.records.filter(x=>x.published),ignored:state.ignored.map(({site_id,page_key})=>({site_id,page_key})),content:state.content,keywords:state.keywords,overrides:state.overrides};const [css,js]=await Promise.all(['style.css','app.js'].map(async f=>{const r=await fetch('./'+f);if(!r.ok)throw Error('导出资源读取失败');return r.text();}));const copy=document.documentElement.cloneNode(true);copy.querySelector('#month').setAttribute('value',$('month').value);copy.querySelector('#content').innerHTML='';copy.querySelector('#notice').innerHTML='';let html=copy.outerHTML.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<link rel="stylesheet"[^>]*>/,'<style>'+css+'</style>');const inline=JSON.stringify(data).replace(/</g,'\\u003c');html=html.replace('</body>',`<script>window.SEO_CONFIG={};window.SEO_OFFLINE=${inline};<\/script><script>${js.replace(/<\/script/gi,'<\\/script')}<\/script></body>`);download('SEO看板_'+$('month').value+'.html','<!doctype html>'+html,'text/html;charset=utf-8');message('已导出离线快照（只含已发布数据）。');}catch(e){message(e.message,true);}};
 load();

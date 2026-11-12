@@ -30,3 +30,9 @@ td.pending,td.pending:hover,table.monthly td.pending{background:#e3efff;box-shad
 #add-record-draft:not(:disabled):hover{background:#eaf6f4}
 .record-draft-footer{margin-top:16px;font-size:13px}
 @media(max-width:900px){.record-draft-fields{grid-template-columns:1fr}}
+.blog-overview{margin:26px 0 22px}
+.blog-overview h2{font-size:22px;margin-bottom:18px}
+.blog-overview .card{min-height:134px}
+.blog-overview .value small{font-size:13px;font-weight:400;color:var(--muted)}
+.opportunity-actions{display:grid;justify-items:start;gap:4px}
+#ignore-page{overflow-wrap:anywhere}
