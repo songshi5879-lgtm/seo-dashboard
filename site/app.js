@@ -50,8 +50,8 @@ function mom(now,prev,m,{daily=true,invert=false}={}){const c=change(now,prev);i
 function blogOverview(sid,m){
  const data=snapshot('pages',sid,m)?.payload?.blog_overview||{};
  const previous=snapshot('pages',sid,shiftMonth(m,-1))?.payload?.blog_overview||{};
- const g=data.gsc||{},a=data.ga4||{},n=a.organic||{};
- const pg=g.full_month&&!g.limited&&previous.gsc?.full_month&&!previous.gsc.limited?previous.gsc:{};
+ const g=data.gsc?.source==='filtered_dates'?data.gsc:{},a=data.ga4||{},n=a.organic||{};
+ const pg=g.source&&previous.gsc?.source===g.source?previous.gsc:{};
  const pa=a.full_month&&previous.ga4?.full_month?previous.ga4:{};
  const pn=pa.organic||{};
  const money=v=>v==null?'—':'US$'+fmt(v);
@@ -61,10 +61,10 @@ function blogOverview(sid,m){
   return card(label,row.sessions==null?'—':fmt(row.sessions)+' <small>会话</small>',
    `订单 ${fmt(row.purchases)}，收入 ${money(row.revenue)}，${mom(row.sessions,pa[key]?.sessions,m,{daily:false})}`);
  };
- const gscNote=g.limited?'（按导出网页明细汇总）':data.gsc&&!g.full_month?'（导出未覆盖整月）':'';
+ const gscNote=g.source?'':'<p class="hint">待导入本月 GSC「网页包含 /blogs/」的整月日期数据。</p>';
  const gaNote=data.ga4&&!a.full_month?`<p class="hint">${esc(a.date_range?`GA4 着陆页数据覆盖 ${a.date_range}`:'GA4 着陆页数据日期范围未确认')}。</p>`:'';
  return `<section class="blog-overview"><h2>博客自然渠道</h2>
-  <h3 class="section-title">Google Search Console${gscNote}</h3><div class="cards">
+  <h3 class="section-title">Google Search Console</h3>${gscNote}<div class="cards">
   ${card('GSC 点击',fmt(g.clicks),mom(g.clicks,pg.clicks,m))}${card('GSC 曝光',fmt(g.impressions),mom(g.impressions,pg.impressions,m))}
   ${card('点击率',percent(g.ctr),'上月 '+percent(pg.ctr))}${card('平均排名',fmt(g.position,1),'上月 '+fmt(pg.position,1))}</div>
   <h3 class="section-title">GA4 自然流量（自然搜索、自然购物、自然社交、自然视频、AI 助手合计）</h3>${gaNote}<div class="cards">
