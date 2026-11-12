@@ -238,7 +238,7 @@ def _gsc_kind(first):
     return None
 
 
-def read_gsc_zip(path, month, warnings):
+def read_gsc_zip(path, month, warnings, *, blog_domain=None):
     src = f"GSC 效果报告（{Path(path).name}）"
     tables = {}
     with zipfile.ZipFile(path) as z:
@@ -251,6 +251,10 @@ def read_gsc_zip(path, month, warnings):
                 tables[k] = (header, rows)
     if "dates" not in tables:
         raise InputError(f"{src}：压缩包里没有“日期”表，无法计算月度总量。")
+    if blog_domain:
+        validate_gsc_blog_filters(tables.get("filters"), blog_domain, src)
+        if len(tables["dates"][0]) != 5:
+            raise InputError(f"{src}：请单独导出一个整月的 GSC 日期数据。")
 
     def metrics(header, rows):
         ex = {0}
@@ -268,8 +272,12 @@ def read_gsc_zip(path, month, warnings):
     dates = metrics(*tables["dates"])
     ds = sorted(datetime.strptime(d["key"][:10], "%Y-%m-%d").date() for d in dates)
     ms, me = month_bounds(month)
+    if not ds:
+        raise InputError(f"{src}：日期表没有数据。")
     if ds[0] < ms or ds[-1] > me:
         raise InputError(f"{src}：日期范围 {ds[0]} 至 {ds[-1]} 超出 {month}。")
+    if blog_domain and (len(ds) != len(set(ds)) or len(ds) != me.day):
+        raise InputError(f"{src}：日期必须覆盖 {ms} 至 {me}，每天一行。")
     if len(ds) < (me - ms).days + 1:
         warnings.append(f"{src}：只有 {len(ds)} 天的数据（{ds[0]} 至 {ds[-1]}），月度总量可能偏少。")
     clicks = sum(d["clicks"] for d in dates)
@@ -277,6 +285,10 @@ def read_gsc_zip(path, month, warnings):
     wpos = sum((d["position"] or 0) * d["impressions"] for d in dates)
     totals = {"clicks": clicks, "impressions": impr, "ctr": clicks / impr if impr else None,
               "position": round(wpos / impr, 2) if impr else None, "days": len(ds)}
+    if blog_domain:
+        if any(d["impressions"] and not d["position"] for d in dates):
+            raise InputError(f"{src}：日期表有曝光但缺少平均排名，请重新导出。")
+        return {"totals": {**totals, "source": "filtered_dates"}}
     if "filters" in tables:
         h, rows = tables["filters"]
         for r in rows:
@@ -292,6 +304,33 @@ def read_gsc_zip(path, month, warnings):
         warnings.append(f"{src}：网页表达到 1000 行上限，长尾页面以“查询词×页面”数据补充。")
     out["pages"] = merge_gsc_anchors(out.get("pages", []), warnings, src)
     return out
+
+
+def validate_gsc_blog_filters(filters, domain, source):
+    rows = filters[1] if filters else []
+    page_values = []
+    web_values = []
+    for row in rows:
+        if len(row) < 2 or not row[1].strip():
+            continue
+        key, value = norm(row[0]), row[1].strip()
+        if key in ("date", "dates", "日期"):
+            continue
+        if key in ("searchtype", "搜索类型"):
+            web_values.append(norm(value))
+        elif key in ("page", "pages", "网页", "页面"):
+            page_values.append(value)
+        else:
+            raise InputError(f"{source}：请移除“{row[0]}”筛选，只保留网页包含 /blogs/。")
+
+    prefixes = ("/blogs/", f"https://{domain}/blogs/")
+    contains = r"^(?:\+|(?:urls?\s+)?contain(?:s|ing)?\s*[:：]?|包含(?:以下内容)?\s*[:：]?)\s*"
+    if len(page_values) != 1 or not re.match(contains, page_values[0], re.I) \
+            or re.sub(contains, "", page_values[0], count=1, flags=re.I) not in prefixes:
+        raise InputError(f"{source}：过滤条件必须是“网页包含 https://{domain}/blogs/”或“网页包含 /blogs/”。")
+    if len(web_values) != 1 or web_values[0] not in {norm(v) for v in
+            ("web", "网页", "网页（基于文本）", "web (text results)", "web (text-based)")}:
+        raise InputError(f"{source}：搜索类型必须为网页（文本）。")
 
 
 # ---------------------------------------------------------------- Looker query x page

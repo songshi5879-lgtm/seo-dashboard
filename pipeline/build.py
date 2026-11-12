@@ -11,6 +11,7 @@ import argparse, json, re, statistics
 from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import unquote_plus
+from zipfile import BadZipFile
 
 from . import config as C
 from .readers import (InputError, read_gsc_zip, read_query_page, read_ga4, read_ga4_with_purchase_flag,
@@ -159,20 +160,7 @@ def is_blog_path(path):
     return bool(re.match(r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?blogs(?:/|\?|$)", path or "", re.I))
 
 
-def build_blog_overview(gsc, landing, land_file, month):
-    rows = [r for r in gsc.get("pages", []) if is_blog_path(r["path"])]
-    gsc_blog = None
-    if rows:
-        clicks = sum(r["clicks"] for r in rows)
-        impressions = sum(r["impressions"] for r in rows)
-        ranked = [r for r in rows if r["position"] is not None]
-        gsc_blog = {
-            "clicks": clicks, "impressions": impressions, "ctr": pct(clicks, impressions),
-            "position": pct(sum(r["position"] * r["impressions"] for r in ranked),
-                            sum(r["impressions"] for r in ranked)),
-            "full_month": gsc["totals"]["days"] == month_bounds(month)[1].day,
-            "limited": gsc["pages_limited"],
-        }
+def build_blog_overview(gsc_blog, landing, land_file, month):
     if not land_file:
         return {"gsc": gsc_blog, "ga4": None}
 
@@ -200,10 +188,20 @@ def build_blog_overview(gsc, landing, land_file, month):
 
 # ------------------------------------------------------------------ main per-site build
 def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_landing=False):
-    gsc = read_gsc_zip(first_file(folder, "gsc_performance*.zip", "*.zip"), month, warnings) \
-        if first_file(folder, "gsc_performance*.zip", "*.zip") else None
-    if gsc is None:
+    gsc_file = first_file(folder, "gsc_performance*.zip") or next(
+        (f for f in sorted(folder.glob("*.zip")) if not f.name.startswith("gsc_blog_performance")), None)
+    if gsc_file is None:
         raise InputError(f"{site_id}：缺少 GSC 效果报告 ZIP（gsc_performance.zip）。")
+    gsc = read_gsc_zip(gsc_file, month, warnings)
+    blog_file = first_file(folder, "gsc_blog_performance*.zip")
+    gsc_blog = None
+    if blog_file:
+        try:
+            gsc_blog = read_gsc_zip(blog_file, month, warnings, blog_domain=C.SITES[site_id]["domain"])["totals"]
+        except (InputError, ValueError, BadZipFile) as error:
+            warnings.append(f"{site_id}：博客 GSC 指标留空。{error}")
+    else:
+        warnings.append(f"{site_id}：缺少 gsc_blog_performance.zip，博客总览 GSC 指标留空。")
     qp_file = first_file(folder, "gsc_query_page*.csv", "query_page*.csv")
     if qp_file is None:
         raise InputError(f"{site_id}：缺少查询词×着陆页明细（gsc_query_page.csv）。")
@@ -619,7 +617,7 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
         "opportunities": {"rows": O},
         "keywords": {"rows": kw_rows},
         "content": {"rows": content_rows, "topics": sorted(topics.values(), key=lambda t: -t["clicks_per_article"])},
-        "pages": {"blog_overview": build_blog_overview(gsc, landing, land_file, month),
+        "pages": {"blog_overview": build_blog_overview(gsc_blog, landing, land_file, month),
                   "rows": [d for d in pages.values() if d["path"].startswith("/")
                            and ("gsc_clicks" in d or d["path"] in saved_paths)]},
     }, prov
