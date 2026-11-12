@@ -46,7 +46,22 @@ function snapshot(section,siteId=$('site').value,m=month()){return state.snapsho
 function filtered(data){const q=$('search').value.toLowerCase().trim();return q?data.filter(r=>Object.values(r).some(v=>String(v??'').toLowerCase().includes(q))):data;}
 function source(s){const notes=state.admin&&state.notes[s?.id];return notes?`<details class="hint"><summary>数据来源与口径${s.published?'':' · 草稿'}</summary><pre class="mono">${esc(JSON.stringify(notes.provenance,null,2))}</pre></details>`:'';}
 function card(label,value,subtitle){return `<div class="card"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="hint">${subtitle}</div></div>`;}
-function mom(now,prev,m,{daily=true,invert=false}={}){const c=change(now,prev);if(c==null)return '环比 —';let s='环比 '+changeHtml(c,invert);if(daily&&now!=null&&prev){const d=(now/daysIn(m))/(prev/daysIn(shiftMonth(m,-1)))-1;s+='，日均 '+changeHtml(d,invert);}return s;}
+function mom(now,prev,m,{daily=true,invert=false,approximate=false}={}){
+ const c=change(now,prev);
+ if(c==null)return '环比 —';
+ const qualifier=approximate?'约 ':' ';
+ let result='环比'+qualifier+changeHtml(c,invert);
+ if(daily){
+  const d=(now/daysIn(m))/(prev/daysIn(shiftMonth(m,-1)))-1;
+  result+='，日均'+qualifier+changeHtml(d,invert);
+ }
+ return result;
+}
+function blogImpressions(metrics){
+ if(metrics.impressions!=null)return metrics.impressions;
+ const abbreviated=metrics.impressions_display?.match(/^(\d+(?:\.\d+)?)\s*万$/);
+ return abbreviated?Number(abbreviated[1])*10000:null;
+}
 function blogOverview(sid,m){
  const data=snapshot('pages',sid,m)?.payload?.blog_overview||{};
  const previous=snapshot('pages',sid,shiftMonth(m,-1))?.payload?.blog_overview||{};
@@ -70,7 +85,8 @@ function blogOverview(sid,m){
  return `<section class="blog-overview"><h2>博客自然渠道</h2>
   <h3 class="section-title">Google Search Console</h3>${gscNote}<div class="cards">
   ${card('GSC 点击',fmt(g.clicks),mom(g.clicks,pg.clicks,m))}
-  ${card('GSC 曝光',g.impressions_display?esc(g.impressions_display):fmt(g.impressions),mom(g.impressions,pg.impressions,m))}
+  ${card('GSC 曝光',g.impressions_display?esc(g.impressions_display):fmt(g.impressions),
+   mom(blogImpressions(g),blogImpressions(pg),m,{approximate:!!(g.impressions_display||pg.impressions_display)}))}
   ${card('点击率',ctr(g),'上月 '+ctr(pg))}${card('平均排名',fmt(g.position,1),'上月 '+fmt(pg.position,1))}</div>
   <h3 class="section-title">GA4 自然流量（自然搜索、自然购物、自然社交、自然视频、AI 助手合计）</h3>${gaNote}<div class="cards">
   ${card('自然会话',fmt(n.sessions),mom(n.sessions,pn.sessions,m))}
