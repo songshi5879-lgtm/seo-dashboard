@@ -45,7 +45,7 @@ function table(columns,data,{emptyTitle,emptyDetail}={}){if(!data.length)return 
 function snapshot(section,siteId=$('site').value,m=month()){return state.snapshots.find(s=>s.section===section&&s.site_id===siteId&&s.month===m);}
 function filtered(data){const q=$('search').value.toLowerCase().trim();return q?data.filter(r=>Object.values(r).some(v=>String(v??'').toLowerCase().includes(q))):data;}
 function source(s){const notes=state.admin&&state.notes[s?.id];return notes?`<details class="hint"><summary>数据来源与口径${s.published?'':' · 草稿'}</summary><pre class="mono">${esc(JSON.stringify(notes.provenance,null,2))}</pre></details>`:'';}
-function card(label,value,subtitle){return `<div class="card"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="hint">${subtitle}</div></div>`;}
+function card(label,value,subtitle,note=''){return `<div class="card"><div class="label">${esc(label)}${note?`<small class="card-note">${esc(note)}</small>`:''}</div><div class="value">${value}</div><div class="hint">${subtitle}</div></div>`;}
 function mom(now,prev,m,{daily=true,invert=false,approximate=false}={}){
  const c=change(now,prev);
  if(c==null)return '环比 —';
@@ -57,6 +57,7 @@ function mom(now,prev,m,{daily=true,invert=false,approximate=false}={}){
  }
  return result;
 }
+const GOOGLE_ORGANIC_NOTE='Google Search + Google Shopping';
 function blogImpressions(metrics){
  if(metrics.impressions!=null)return metrics.impressions;
  const abbreviated=metrics.impressions_display?.match(/^(\d+(?:\.\d+)?)\s*万$/);
@@ -72,10 +73,10 @@ function blogOverview(sid,m){
  const pn=pa.organic||{};
  const money=v=>v==null?'—':'US$'+fmt(v);
  const seconds=v=>v==null?'—':fmt(v)+' 秒';
- const channelCard=(label,key)=>{
+ const channelCard=(label,key,note='')=>{
   const row=a[key]||{};
   return card(label,row.sessions==null?'—':fmt(row.sessions)+' <small>会话</small>',
-   `订单 ${fmt(row.purchases)}，收入 ${money(row.revenue)}，${mom(row.sessions,pa[key]?.sessions,m,{daily:false})}`);
+   `订单 ${fmt(row.purchases)}，收入 ${money(row.revenue)}，${mom(row.sessions,pa[key]?.sessions,m,{daily:false})}`,note);
  };
  const ctr=metrics=>percent(metrics.ctr,metrics.source==='gsc_screenshot'?1:2);
  let gscNote='';
@@ -93,7 +94,7 @@ function blogOverview(sid,m){
   ${card('订单',fmt(n.purchases),mom(n.purchases,pn.purchases,m,{daily:false}))}
   ${card('收入',money(n.revenue),mom(n.revenue,pn.revenue,m,{daily:false}))}
   ${card('转化率（订单 ÷ 会话）',percent(n.conversion),'上月 '+percent(pn.conversion))}</div>
-  <div class="cards">${channelCard('其中 Google 自然搜索','google_organic')}${channelCard('其中 AI 助手','ai')}
+  <div class="cards">${channelCard('其中 Google 自然','google_organic',GOOGLE_ORGANIC_NOTE)}${channelCard('其中 AI 助手','ai')}
   ${card('平均停留时长',seconds(a.avg_engagement),'上月 '+seconds(pa.avg_engagement))}
   ${card('跳出率',percent(a.bounce_rate),'上月 '+percent(pa.bounce_rate))}</div></section>`;
 }
@@ -110,7 +111,7 @@ function overview(){
  ${card('自然会话',fmt(o.sessions),mom(o.sessions,po.sessions,m))}${card('订单',fmt(o.purchases),mom(o.purchases,po.purchases,m,{daily:false}))}
  ${card('收入','$'+fmt(o.revenue,0),mom(o.revenue,po.revenue,m,{daily:false}))}${card('转化率（订单 ÷ 会话）',percent(o.conversion),'上月 '+percent(po.conversion))}</div>`;
  const go=p.ga4?.google_organic||{},ai=p.ga4?.ai||{},pgo=prev.ga4?.google_organic||{},pai=prev.ga4?.ai||{};
- html+=`<div class="cards">${card('其中 Google 自然搜索',fmt(go.sessions)+' <small>会话</small>',`订单 ${fmt(go.purchases)}，收入 $${fmt(go.revenue,0)}；${mom(go.sessions,pgo.sessions,m,{daily:false})}`)}
+ html+=`<div class="cards">${card('其中 Google 自然',fmt(go.sessions)+' <small>会话</small>',`订单 ${fmt(go.purchases)}，收入 $${fmt(go.revenue,0)}；${mom(go.sessions,pgo.sessions,m,{daily:false})}`,GOOGLE_ORGANIC_NOTE)}
  ${card('其中 AI 助手',fmt(ai.sessions)+' <small>会话</small>',`订单 ${fmt(ai.purchases)}，收入 $${fmt(ai.revenue,0)}；${mom(ai.sessions,pai.sessions,m,{daily:false})}`)}
  ${card('Google 自然会话 ÷ GSC 点击',g.clicks&&go.sessions!=null?fmt(go.sessions/g.clicks,2):'—',state.admin?esc(state.guidance.session_ratio):'')}
  ${state.admin?card('数据提醒',String((state.notes[s.id]?.checks||[]).length),(state.notes[s.id]?.checks||[]).map(esc).join('<br>')||'无'):''}</div>`;
@@ -515,8 +516,6 @@ const DEPARTMENT_KEYS=new Set(MONTHLY_ROWS.map(([key])=>key));
 const RANK_KEYS=['rank_1_3','rank_4_10','rank_11_20','rank_21_50','rank_51_plus'];
 function monthlyRaw(key,p,siteId,m,O){
  const o=O[key]?.value;if(o!==undefined)return {v:o===''?null:key==='page_optimization'?o:Number(o),ov:true};
- if(key==='rank_total'){const vals=RANK_KEYS.map(k=>monthlyRaw(k,p,siteId,m,O)),any=vals.some(x=>x.v!=null);
-  if(any&&(vals.some(x=>x.ov)||p?.rank_total==null))return {v:vals.reduce((a,x)=>a+(x.v||0),0),calc:true};}
  let v=p?.[key];
  if(key==='page_optimization'&&(v==null||v==='')){const c={};state.records.filter(r=>r.site_id===siteId&&r.optimized_on?.slice(0,7)===m.slice(0,7)).forEach(r=>c[r.category]=(c[r.category]||0)+1);v=Object.keys(c).length?Object.entries(c).map(([k,n])=>`${k} ${n} 页`).join('；'):null;return {v,auto:v!=null};}
  return {v:v===''?null:v??null};}
@@ -540,7 +539,7 @@ function monthly(){
  const {ms,out}=monthlyGrid();const cur=month();
  const head='<tr><th>网址</th><th>调研类目</th><th>工具/工作</th>'+ms.map(m=>`<th class="${m===cur?'current':''}">${esc(m.slice(0,7))}</th>`).join('')+'</tr>';
  const body=out.map(r=>`<tr class="${r.url?'group-start':''}"><td>${esc(r.url)}</td><td>${esc(r.cat)}</td><td>${esc(r.label)}</td>`+ms.map(m=>{const x=r.cells[m],type=r.key==='page_optimization'?'text':'mnum';
-  const tip=x.ov?'手动填写的值；清空后恢复为导入的数据':x.calc?'自动计算：五个排名区间相加（手动填写可覆盖）':x.auto?'按当月优化记录自动汇总（手动填写可覆盖）':'';
+  const tip=x.ov?'手动填写的值；清空后恢复为导入的数据':x.auto?'按当月优化记录自动汇总（手动填写可覆盖）':'';
   const raw=x.ov?(x.v==null?'-':String(x.v)):'';
   return `<td class="${[m===cur?'current':'',state.admin?'editable':'',x.ov?'ov':'',x.calc||x.auto?'calc':''].filter(Boolean).join(' ')}"${edAttr('ov',{col:'value',type,row:r.key,site:r.site,grid:'monthly',month:m})} data-raw="${esc(x.ov?raw:(x.v==null||x.auto?'':String(x.v)))}"${tip?` title="${esc(tip)}"`:''}>${esc(r[m])}</td>`;}).join('')+'</tr>').join('');
  const missing=out.filter(r=>r[cur]===''&&!['ahrefs_traffic','page_optimization'].includes(r.key)).length;

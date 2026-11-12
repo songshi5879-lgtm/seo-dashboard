@@ -101,7 +101,8 @@ def summarize_ga4(rows):
         return {"sessions": s if complete["sessions"] else None, "purchases": p,
                 "revenue": round(sum(x["revenue"] for x in rs), 2) if complete["revenue"] else None,
                 "conversion": pct(p, s) if p is not None else None}
-    google = [x for x in inc if x["channel"].lower() == "organic search"
+    # Google 自然 = Google Search + Google Shopping (both google / organic).
+    google = [x for x in inc if x["channel"].lower() in ("organic search", "organic shopping")
               and x["source_medium"].lower() in ("google", "google / organic")]
     ai = [x for x in inc if x["channel"] == "AI Assistant"]
     by_channel = {}
@@ -639,8 +640,7 @@ def build_monthly(month, root, site_totals, warnings):
                 raise InputError(f"Semrush 模板：无法识别站点“{r['site']}”。")
             bands = [num(r[k]) for k in ("r1", "r2", "r3", "r4", "r5")]
             tot = num(r["total"])
-            if tot is not None and all(b is not None for b in bands) and abs(sum(bands) - tot) > 0.5:
-                warnings.append(f"Semrush {sid}：各排名段相加 {sum(bands):.0f} ≠ 总数 {tot:.0f}。")
+            # 总数 is Semrush's headline keyword count; it is not expected to equal the sum of the bands.
             rows.setdefault(sid, {}).update(
                 semrush_traffic=num(r["traffic"]), rank_1_3=bands[0], rank_4_10=bands[1], rank_11_20=bands[2],
                 rank_21_50=bands[3], rank_51_plus=bands[4], rank_total=tot, rank_tool="Semrush",

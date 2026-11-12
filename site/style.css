@@ -36,3 +36,4 @@ td.pending,td.pending:hover,table.monthly td.pending{background:#e3efff;box-shad
 .blog-overview .value small{font-size:13px;font-weight:400;color:var(--muted)}
 .opportunity-actions{display:grid;justify-items:start;gap:4px}
 #ignore-page{overflow-wrap:anywhere}
+.card-note{display:block;margin-top:3px;color:var(--muted);font-size:11px}
