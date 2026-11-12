@@ -287,7 +287,8 @@ def read_gsc_zip(path, month, warnings):
     for k in ("queries", "pages", "countries", "devices"):
         if k in tables:
             out[k] = metrics(*tables[k])
-    if "pages" in out and len(out["pages"]) >= 1000:
+    out["pages_limited"] = len(out.get("pages", [])) >= 1000
+    if out["pages_limited"]:
         warnings.append(f"{src}：网页表达到 1000 行上限，长尾页面以“查询词×页面”数据补充。")
     out["pages"] = merge_gsc_anchors(out.get("pages", []), warnings, src)
     return out

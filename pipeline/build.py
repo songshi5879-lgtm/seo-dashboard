@@ -14,7 +14,8 @@ from urllib.parse import unquote_plus
 
 from . import config as C
 from .readers import (InputError, read_gsc_zip, read_query_page, read_ga4, read_ga4_with_purchase_flag,
-                      read_unindexed, read_table_dicts, url_path, base_path, page_type, num, month_bounds)
+                      read_unindexed, read_table_dicts, url_path, base_path, page_type, num, month_bounds,
+                      ga4_date_range, read_rows)
 
 
 def pct(a, b):
@@ -152,6 +153,49 @@ def opp(category, site_id, path, query=None, action="", evidence="", prio="中",
     for k in ("impressions", "clicks", "ctr", "position", "sessions", "purchases", "prev_clicks", "change"):
         row[k] = m.get(k)
     return row
+
+
+def is_blog_path(path):
+    return bool(re.match(r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?blogs(?:/|\?|$)", path or "", re.I))
+
+
+def build_blog_overview(gsc, landing, land_file, month):
+    rows = [r for r in gsc.get("pages", []) if is_blog_path(r["path"])]
+    gsc_blog = None
+    if rows:
+        clicks = sum(r["clicks"] for r in rows)
+        impressions = sum(r["impressions"] for r in rows)
+        ranked = [r for r in rows if r["position"] is not None]
+        gsc_blog = {
+            "clicks": clicks, "impressions": impressions, "ctr": pct(clicks, impressions),
+            "position": pct(sum(r["position"] * r["impressions"] for r in ranked),
+                            sum(r["impressions"] for r in ranked)),
+            "full_month": gsc["totals"]["days"] == month_bounds(month)[1].day,
+            "limited": gsc["pages_limited"],
+        }
+    if not land_file:
+        return {"gsc": gsc_blog, "ga4": None}
+
+    landing_blog = [r for r in landing if is_blog_path(r.get("path"))]
+    totals = summarize_ga4(landing_blog)
+    organic = [r for r in landing_blog if (r.get("sessions") or 0) > 0
+               and classify(r.get("source_medium"), r.get("channel"))[1]]
+    sessions = sum(r["sessions"] for r in organic)
+
+    def average(metric):
+        if not sessions or any(r.get(metric) is None for r in organic):
+            return None
+        return sum(r[metric] * r["sessions"] for r in organic) / sessions
+
+    engagement_rate = average("engagement_rate")
+    start, end = ga4_date_range(read_rows(land_file)[2])
+    return {"gsc": gsc_blog, "ga4": {
+        **{key: totals[key] for key in ("organic", "google_organic", "ai")},
+        "avg_engagement": average("avg_engagement"),
+        "bounce_rate": None if engagement_rate is None else 1 - engagement_rate,
+        "date_range": f"{start} 至 {end}" if start and end else None,
+        "full_month": (start, end) == month_bounds(month),
+    }}
 
 
 # ------------------------------------------------------------------ main per-site build
@@ -575,7 +619,8 @@ def build_site(site_id, month, folder, prev, warnings, extras, allow_partial_lan
         "opportunities": {"rows": O},
         "keywords": {"rows": kw_rows},
         "content": {"rows": content_rows, "topics": sorted(topics.values(), key=lambda t: -t["clicks_per_article"])},
-        "pages": {"rows": [d for d in pages.values() if d["path"].startswith("/")
+        "pages": {"blog_overview": build_blog_overview(gsc, landing, land_file, month),
+                  "rows": [d for d in pages.values() if d["path"].startswith("/")
                            and ("gsc_clicks" in d or d["path"] in saved_paths)]},
     }, prov
 
